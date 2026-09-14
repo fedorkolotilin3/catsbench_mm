@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /data: fixed_benchmark
+  - override /model: null
+  - override /method: dlight_sb
+  - override /callbacks: [fixed_experiment]
+  - override /logger: csv
+  - override /trainer: cpu
+  - _self_
+
+prior:
+  alpha: 0.02
+  prior_type: gaussian
+  num_timesteps: 15
+  num_skip_steps: 8
+  dtype: float64
+  eps: 0.0
+
+method:
+  num_potentials: 32
+  distr_init: samples
+  entropy_lambda: 0
+  optimizer:
+    lr: 0.03
+    betas: [0.9, 0.999]
+    weight_decay: 0.0

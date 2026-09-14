@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /experiment/dlight_sb/fixed_cpu
+  - override /method: dlight_sb_mm
+  - _self_
+
+method:
+  optimizer: null
+  tol: 1.0e-7

@@ -1,0 +1,12 @@
+defaults:
+  - dlight_sb
+  - _self_
+
+_target_: src.methods.dlight_sb_mm.DLightSBMM
+optimizer: null
+scheduler: null
+inner_sweeps: 1
+# Stop when abs(loss_new-loss_old) <= tol * max(1, abs(loss_old)).
+# Requires the same full-dataset batch every epoch. null disables stopping.
+tol: 1.0e-7
+entropy_lambda: 0
