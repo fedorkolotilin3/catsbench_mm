@@ -6,7 +6,8 @@ Usage:
     predictions = solver.sample(test_x)
 
 Lightning calls training_step: one batch is one complete MM update.
-Use a fixed full-dataset batch for monotonicity of the full empirical loss.
+The update monotonically decreases the empirical loss of that current batch.
+With SampledCoupleDataset, successive steps may use fresh marginal samples.
 The original loss, prior and sampling methods are inherited unchanged.
 """
 
@@ -127,7 +128,7 @@ class DLightSBMM(DLightSB):
         if self.dtype != torch.float64:
             raise ValueError("Use trainer precision='64-true' for MM")
         if self.hparams.tol is not None and self.trainer.num_training_batches != 1:
-            raise ValueError("MM tolerance requires one fixed full-dataset batch per epoch")
+            raise ValueError("MM tolerance requires one full-dataset batch per epoch")
 
     def training_step(self, batch, batch_idx):
         x0, x1 = batch
