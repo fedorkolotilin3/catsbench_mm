@@ -1,4 +1,4 @@
-"""CPU block-MM for the unregularized DLightSB loss (see theory.md).
+"""Block-MM for the unregularized DLightSB loss (see theory.md).
 
 Usage:
     solver = DLightSBMM.from_model(model, state_dict=initial_state)
@@ -13,6 +13,12 @@ The original loss, prior and sampling methods are inherited unchanged.
 
 from copy import deepcopy
 import math
+import time
+
+try:
+    import resource
+except ImportError:  # resource is unavailable in native Windows Python
+    resource = None
 
 import torch
 
@@ -22,7 +28,7 @@ from .dlight_sb import DLightSB
 def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Minimize a*z - b*log(z) on each row's simplex, including b=0.
 
-    Inputs are finite CPU float64 tensors [number_of_blocks, block_size].
+    Inputs are finite float64 tensors [number_of_blocks, block_size].
     The Lagrange multiplier is found by bisection; zero-count coordinates
     receive residual mass only when their linear coefficient is minimal.
     """
@@ -123,8 +129,6 @@ class DLightSBMM(DLightSB):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
     def on_train_start(self):
-        if self.trainer.world_size != 1 or self.device.type != "cpu":
-            raise ValueError("MM currently supports a single CPU process")
         if self.dtype != torch.float64:
             raise ValueError("Use trainer precision='64-true' for MM")
         if self.hparams.tol is not None and self.trainer.num_training_batches != 1:
@@ -132,7 +136,16 @@ class DLightSBMM(DLightSB):
 
     def training_step(self, batch, batch_idx):
         x0, x1 = batch
+        update_started = time.perf_counter()
         info = self.optimizers().step(closure=lambda: self.mm_step(x0, x1))
+        info["update_seconds"] = time.perf_counter() - update_started
+        # Linux reports ru_maxrss in KiB. The supported experiment environments
+        # are Linux/WSL/Colab, so expose the process peak directly in MiB.
+        if resource is not None:
+            info["peak_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        info["batch_size"] = len(x0)
+        # Manual optimization advances global_step inside optimizer.step().
+        info["samples_seen"] = self.global_step * len(x0)
         # Compare the same empirical objective before/after the accepted step.
         # None disables convergence stopping; zero requires exact equality.
         relative_change = abs(info["loss"] - info["loss_before"]) / max(1.0, abs(info["loss_before"]))
@@ -149,12 +162,10 @@ class DLightSBMM(DLightSB):
 
     @classmethod
     def from_model(cls, model: DLightSB, *, state_dict=None, tol=None):
-        """Copy a CPU DLightSB; optionally restore its pre-training weights.
+        """Copy a DLightSB; optionally restore its pre-training weights.
 
         The prior is copied too, so float64 conversion never changes model.
         """
-        if model.device.type != "cpu":
-            raise ValueError("DLightSBMM requires a CPU model")
         if model.hparams.entropy_lambda != 0:
             raise ValueError("MM supports entropy_lambda=0 only")
         keys = (
@@ -162,7 +173,7 @@ class DLightSBMM(DLightSB):
             "distr_init", "entropy_warmup_steps",
             "entropy_lambda", "sample_prob", "tau",
         )
-        with torch.device("cpu"):
+        with torch.device(model.device):
             solver = cls(
                 prior=deepcopy(model.prior).double(),
                 optimizer=None, scheduler=None, tol=tol,
@@ -197,12 +208,11 @@ class DLightSBMM(DLightSB):
     def mm_step(self, x0, x1, *, inner_sweeps=None):
         """One MM update of the empirical loss on the supplied marginals.
 
-        Duplicates are compressed with exact empirical weights. A new bound is
-        built once, then minimized blockwise. Commit only a checked candidate.
-        No persistent data cache: another batch/checkpoint cannot reuse stale Q.
+        Every observation is retained with its empirical uniform weight. A new
+        bound is built once, then minimized blockwise. Commit only a checked
+        candidate. No persistent data cache: another batch/checkpoint cannot
+        reuse stale Q.
         """
-        if self.device.type != "cpu" or self.prior.log_p_cum.device.type != "cpu":
-            raise ValueError("MM runs on CPU only")
         if self.dtype != torch.float64 or self.prior.dtype != torch.float64:
             raise ValueError("MM requires float64 parameters and prior")
         if self.hparams.entropy_lambda != 0:
@@ -211,8 +221,8 @@ class DLightSBMM(DLightSB):
         if not isinstance(inner_sweeps, int) or inner_sweeps < 1:
             raise ValueError("inner_sweeps must be a positive integer")
         for x in (x0, x1):
-            if not isinstance(x, torch.Tensor) or x.device.type != "cpu":
-                raise ValueError("Training data must be CPU tensors")
+            if not isinstance(x, torch.Tensor) or x.device != self.device:
+                raise ValueError("Training data and MM parameters must use the same device")
             if x.ndim < 2 or x.flatten(1).shape[1] != self.hparams.dim or len(x) == 0:
                 raise ValueError("Training data must flatten to nonempty [N, dim] tensors")
             if x.dtype != torch.long or x.min() < 0 or x.max() >= self.hparams.num_categories:
@@ -221,10 +231,10 @@ class DLightSBMM(DLightSB):
             raise ValueError("Call init_weights first, or use DLightSBMM.from_model")
 
         x0, x1 = x0.flatten(1), x1.flatten(1)
-        source, counts0 = torch.unique(x0, dim=0, return_counts=True)
-        target, counts1 = torch.unique(x1, dim=0, return_counts=True)
-        weight0 = counts0.double() / len(x0)
-        weight1 = counts1.double() / len(x1)
+        source = x0
+        target = x1
+        weight0 = self.log_alpha.new_full((len(source),), 1.0 / len(source))
+        weight1 = self.log_alpha.new_full((len(target),), 1.0 / len(target))
         dim, categories, components = self.log_cp_cores.shape
         q = self.prior.extract_last_cum_matrix(source).exp().permute(1, 0, 2).contiguous()
         if not torch.isfinite(q).all() or (q <= 0).any():
@@ -239,7 +249,7 @@ class DLightSBMM(DLightSB):
         r, beta = log_r.exp(), log_beta.exp()
         if not torch.isfinite(r).all() or not torch.isfinite(beta).all():
             raise ValueError("Invalid initial potential parameters")
-        u = torch.stack([q[d] @ r[d] for d in range(dim)])  # [D, unique_N0, K]
+        u = torch.stack([q[d] @ r[d] for d in range(dim)])  # [D, N0, K]
 
         def log_normalizer():
             return torch.logsumexp(u.log().sum(dim=0) + beta.log(), dim=1)

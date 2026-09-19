@@ -1,51 +1,61 @@
 # @package _global_
 
-# Reuse the repository's original DLightSB BenchmarkHD base. The repository's
-# d2_g002 leaf uses a relative defaults path that Hydra 1.3 resolves twice, so
-# its three leaf values are repeated below without modifying that source file.
+# The only MM experiment configuration. It inherits the published DLightSB
+# d2/Gaussian-0.02 benchmark and changes only the optimizer implementation,
+# training batch protocol, numerical precision, and local logger.
 defaults:
   - /experiment/dlight_sb/benchmark_hd/default
-  - override /method: dlight_sb_mm
-  - override /trainer: mm_cpu
-  - override /logger: tensorboard
+  - override /logger: csv
   - _self_
 
 data:
   dim: 2
-
-  # SampledCoupleDataset draws a new batch from p0 and p1 on every epoch.
-  # One large batch is one stochastic population-MM approximation/update.
   batch_size: 10000
   num_train_batches: 1
-
-  # The stock callback evaluates one conditional X per test batch. With the
-  # standard 10,000-point benchmark test set this yields 1,250 distinct X's.
-  val_batch_size: 8
+  # Keep evaluation identical to the reproduced gradient baseline.
+  val_batch_size: 128
 
 prior:
   prior_type: gaussian
   alpha: 0.02
 
 method:
+  _target_: src.methods.dlight_sb_mm.DLightSBMM
   optimizer: null
   scheduler: null
   entropy_lambda: 0
   inner_sweeps: 1
-  # Consecutive epochs use fresh samples, so their empirical losses must not be
-  # compared by the fixed-dataset convergence rule.
+  # Every update receives a fresh population sample, so losses from consecutive
+  # batches cannot be used by the fixed-sample convergence rule.
   tol: null
 
 callbacks:
+  # The stock plotter supports WandB/Comet, while this experiment is CSV-only.
+  plotter_callback: null
   metric_callback:
-    # For every selected conditional X, generate 1,000 true and model Y values.
-    # At the standard test size: 1,250 X's x 1,000 Y's per distribution.
     num_cond_samples: 1000
   model_checkpoint:
-    # Keep last.ckpt for the separate Hydra test invocation without writing a
-    # checkpoint after every one-step epoch.
+    # Produce last.ckpt for the separate test command without 100 checkpoints.
     every_n_epochs: 100
     save_top_k: 1
 
+logger:
+  wandb: null
+  csv:
+    version: train
+    flush_logs_every_n_steps: 1
+
 trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 64-true
+  deterministic: true
   max_epochs: 100
   max_steps: 100
+  limit_train_batches: 1.0
+  num_sanity_val_steps: 0
+  limit_val_batches: 0
+  limit_test_batches: 1.0
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  log_every_n_steps: 1

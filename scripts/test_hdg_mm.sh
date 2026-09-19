@@ -12,5 +12,5 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 python -m src.run \
   task_name=test \
   ckpt_path=auto \
-  experiment=dlight_sb_mm/benchmark_hd/d2_g002
-
+  experiment=dlight_sb_mm/benchmark_hd/d2_g002 \
+  logger.csv.version=test

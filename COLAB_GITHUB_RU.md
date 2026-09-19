@@ -1,7 +1,7 @@
 # catsbench_mm: GitHub, Google Colab и Google Drive
 
-Добавлены только вспомогательные файлы. Исходный код, существующие конфиги и
-скрипты экспериментов этим набором не изменяются.
+Проект содержит воспроизводимый baseline и единственный итоговый MM-эксперимент
+для BenchmarkHD `d2_g002`.
 
 ## 1. Сохранение проекта в личный GitHub
 
@@ -38,7 +38,7 @@ Personal Access Token через менеджер учётных данных; �
 
 ```bash
 cd /content
-git clone --branch catsbench-mm git@github.com:YOUR_LOGIN/catsbench_mm.git
+git clone --branch catsbench-mm https://github.com/fedorkolotilin3/catsbench_mm.git
 cd catsbench_mm
 bash scripts/setup_colab.sh
 ```
@@ -59,34 +59,37 @@ PIN_TORCH=0 bash scripts/setup_colab.sh
 INSTALL_FLASH_ATTN=1 bash scripts/setup_colab.sh
 ```
 
-## 3. Запуск baseline-эксперимента на GPU
+## 3. Полный baseline: обучение и тестирование на GPU
 
-Обучение с локальным CSV-логированием:
-
-```bash
-bash scripts/run_colab.sh \
-  experiment=dlight_sb/benchmark_hd/d2_g002 \
-  logger=csv \
-  logger.csv.version=train \
-  '~callbacks.plotter_callback'
-```
-
-Тестирование лучшего checkpoint:
+В настройках Colab сначала выберите GPU runtime, затем выполните:
 
 ```bash
-bash scripts/run_colab.sh \
-  task_name=test \
-  ckpt_path=auto \
-  experiment=dlight_sb/benchmark_hd/d2_g002 \
-  logger=csv \
-  logger.csv.version=test \
-  '~callbacks.plotter_callback'
+bash scripts/run_baseline_train_test.sh
 ```
 
-Обёртка выставляет `LSE_BACKEND=any`, чтобы GPU-запуск не требовал локальной
-сборки Triton-ядер.
+Сценарий сначала обучает обычный `DLightSB` градиентным спуском, затем загружает
+`last.ckpt` и запускает полный test. `LSE_BACKEND=any` не требует сборки
+локальных Triton-ядер.
 
-## 4. Google Drive: сохранение результатов между сессиями
+## 4. Полный MM: обучение и тестирование на CPU
+
+MM использует CPU и `float64`; наличие GPU на этом этапе не требуется:
+
+```bash
+bash scripts/run_mm_train_test.sh
+```
+
+По умолчанию используются все доступные CPU-потоки. Ограничить их число можно:
+
+```bash
+MM_NUM_THREADS=4 bash scripts/run_mm_train_test.sh
+```
+
+Оба сценария записывают обучение в `metrics/train/metrics.csv`, тестирование —
+в `metrics/test/metrics.csv`, а модель — в `checkpoints/last.ckpt` внутри каталога
+соответствующего Hydra-запуска.
+
+## 5. Google Drive: сохранение результатов между сессиями
 
 Сначала смонтируйте Drive кнопкой **Mount Drive** в расширении Colab для VS Code
 или выполните в ячейке Colab:

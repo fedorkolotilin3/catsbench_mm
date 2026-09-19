@@ -9,6 +9,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${CATS_VENV_DIR:-${PROJECT_ROOT}/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PYTHON_VERSION="${CATS_PYTHON_VERSION:-3.12}"
+export MPLBACKEND="${CATS_MPLBACKEND:-Agg}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "Python executable not found: ${PYTHON_BIN}" >&2

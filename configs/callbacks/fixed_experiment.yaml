@@ -1,5 +1,0 @@
-# @package callbacks
-fixed_experiment:
-  _target_: src.utils.fixed_experiment.FixedExperiment
-  num_threads: 4
-  eval_batch_size: 256
