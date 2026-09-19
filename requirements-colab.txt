@@ -1,7 +1,6 @@
 # Runtime dependencies used by catsbench experiments in Google Colab.
-# PyTorch and torchvision are intentionally installed by scripts/setup_colab.sh:
-# the default is to reuse Colab's CUDA-compatible build, while PIN_TORCH=1
-# installs the versions from environment.yml.
+# PyTorch and torchvision are intentionally installed by scripts/setup_colab.sh
+# from the CUDA 12.4 index, using the versions from environment.yml.
 
 click==8.2.1
 einops==0.8.1

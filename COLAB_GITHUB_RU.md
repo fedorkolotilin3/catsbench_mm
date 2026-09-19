@@ -43,13 +43,13 @@ cd catsbench_mm
 bash scripts/setup_colab.sh
 ```
 
-По умолчанию окружение `.venv` использует CUDA-совместимый PyTorch, уже
-установленный в текущем образе Colab. Остальные версии повторяют
-`environment.yml`. Чтобы принудительно поставить версии PyTorch из исходного
-окружения (`2.6.0`, CUDA 12.4):
+Скрипт через `uv` скачивает Python 3.12 и не зависит от версии системного Python
+в образе Colab. По умолчанию устанавливаются версии PyTorch из исходного
+окружения (`2.6.0`, CUDA 12.4). Чтобы вместо них поставить актуальную сборку с
+PyPI:
 
 ```bash
-PIN_TORCH=1 bash scripts/setup_colab.sh
+PIN_TORCH=0 bash scripts/setup_colab.sh
 ```
 
 `flash-attn` не нужен для `benchmark_hd` и по умолчанию не собирается. Для
@@ -128,4 +128,3 @@ CATS_DRIVE_DIR=/content/drive/MyDrive/experiments/catsbench_mm \
 `logs/runs/.../metrics/train/metrics.csv`, а checkpoints — в каталоге того же
 запуска. Поэтому синхронизации `logs` достаточно для переноса результатов и
 продолжения их анализа.
-

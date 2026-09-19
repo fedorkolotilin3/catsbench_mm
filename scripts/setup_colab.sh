@@ -8,44 +8,46 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${CATS_VENV_DIR:-${PROJECT_ROOT}/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_VERSION="${CATS_PYTHON_VERSION:-3.12}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "Python executable not found: ${PYTHON_BIN}" >&2
   exit 1
 fi
 
-"${PYTHON_BIN}" - <<'PY'
-import sys
-if sys.version_info < (3, 10):
-    raise SystemExit("catsbench requires Python 3.10 or newer")
-print(f"Using Python {sys.version.split()[0]}")
-PY
+if ! "${PYTHON_BIN}" -m uv --version >/dev/null 2>&1; then
+  "${PYTHON_BIN}" -m pip install --upgrade uv
+fi
 
+# Colab can change its system Python between images (including Python 3.13
+# builds where ensurepip is unavailable). uv downloads the requested Python and
+# creates the environment without depending on the image's venv/ensurepip.
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-  # Colab supplies a CUDA-compatible PyTorch build. system-site-packages lets the
-  # venv reuse it instead of downloading another multi-gigabyte wheel.
-  "${PYTHON_BIN}" -m venv --system-site-packages "${VENV_DIR}"
+  "${PYTHON_BIN}" -m uv venv --python "${PYTHON_VERSION}" --seed "${VENV_DIR}"
 fi
 
 VENV_PYTHON="${VENV_DIR}/bin/python"
-"${VENV_PYTHON}" -m pip install --upgrade pip setuptools wheel
+echo "Using $("${VENV_PYTHON}" --version) at ${VENV_PYTHON}"
 
-if [[ "${PIN_TORCH:-0}" == "1" ]]; then
-  "${VENV_PYTHON}" -m pip install \
+if [[ "${PIN_TORCH:-1}" == "1" ]]; then
+  "${PYTHON_BIN}" -m uv pip install --python "${VENV_PYTHON}" \
     --index-url https://download.pytorch.org/whl/cu124 \
     torch==2.6.0 torchvision==0.21.0
 elif ! "${VENV_PYTHON}" -c 'import torch, torchvision' >/dev/null 2>&1; then
-  echo "PyTorch is not available in this runtime; installing current PyPI builds."
-  "${VENV_PYTHON}" -m pip install torch torchvision
+  echo "Installing current PyPI builds of PyTorch and torchvision."
+  "${PYTHON_BIN}" -m uv pip install --python "${VENV_PYTHON}" torch torchvision
 fi
 
-"${VENV_PYTHON}" -m pip install -r "${PROJECT_ROOT}/requirements-colab.txt"
-"${VENV_PYTHON}" -m pip install --no-deps --editable "${PROJECT_ROOT}"
+"${PYTHON_BIN}" -m uv pip install --python "${VENV_PYTHON}" \
+  -r "${PROJECT_ROOT}/requirements-colab.txt"
+"${PYTHON_BIN}" -m uv pip install --python "${VENV_PYTHON}" \
+  --no-deps --editable "${PROJECT_ROOT}"
 
 # flash-attn is not needed for benchmark_hd and is expensive to build. It can
 # still be installed explicitly for image experiments that require it.
 if [[ "${INSTALL_FLASH_ATTN:-0}" == "1" ]]; then
-  "${VENV_PYTHON}" -m pip install flash-attn==2.7.3 --no-build-isolation
+  "${PYTHON_BIN}" -m uv pip install --python "${VENV_PYTHON}" \
+    flash-attn==2.7.3 --no-build-isolation
 fi
 
 "${VENV_PYTHON}" - <<'PY'
@@ -68,4 +70,3 @@ PY
 echo
 echo "Run an experiment with:"
 echo "  bash scripts/run_colab.sh experiment=dlight_sb/benchmark_hd/d2_g002 logger=csv logger.csv.version=train '~callbacks.plotter_callback'"
-
