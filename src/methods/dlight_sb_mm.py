@@ -83,10 +83,12 @@ def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     minima = a == a.amin(dim=1, keepdim=True)
     linear_solution = minima.to(a.dtype) / minima.sum(dim=1, keepdim=True)
     z = torch.where(has_counts, z, linear_solution)
-    # A positive count must not get log(0) just because division underflowed.
-    # Use the smallest representable positive float, not pseudo-count smoothing.
+    # Keep the potential strictly positive between updates. Exact empirical MM
+    # may put zero mass on cells absent from the current random batch; a fresh
+    # batch can contain those cells and would then have log-potential -inf.
+    # The smallest representable float is a numerical guard, not a pseudo-count.
     smallest = torch.nextafter(a.new_tensor(0.0), a.new_tensor(1.0))
-    return torch.where(positive & (z == 0), smallest, z)
+    return torch.where(z == 0, smallest, z)
 
 
 def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
@@ -108,14 +110,25 @@ def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor
     safe_a_max = torch.where(torch.isfinite(a_max), a_max, 0.0)
     safe_b_max = torch.where(torch.isfinite(b_max), b_max, 0.0)
     product = torch.exp(log_a - safe_a_max) @ torch.exp(log_b - safe_b_max)
-    result = product.log() + safe_a_max + safe_b_max
+    valid_product = torch.isfinite(product) & (product > 0)
+    # Avoid evaluating log(0), log(NaN), or log(inf). Besides underflow, some
+    # BLAS implementations can return a non-finite value for an otherwise
+    # representable scaled product. Those entries use the exact log reduction.
+    result = torch.where(
+        valid_product,
+        product.clamp_min(torch.finfo(product.dtype).tiny).log()
+        + safe_a_max
+        + safe_b_max,
+        -torch.inf,
+    )
 
-    # A zero scaled dot product is possible when the two maxima have almost
-    # disjoint support. Keep memory bounded by reducing one output row at a time.
-    bad_rows = torch.nonzero((product == 0).any(dim=1), as_tuple=False).flatten()
+    # Keep memory bounded by reducing one affected output row at a time.
+    bad_rows = torch.nonzero((~valid_product).any(dim=1), as_tuple=False).flatten()
     for row in bad_rows.tolist():
         exact = torch.logsumexp(log_a[row, :, None] + log_b, dim=0)
-        result[row] = torch.where(product[row] == 0, exact, result[row])
+        result[row] = torch.where(valid_product[row], result[row], exact)
+    if torch.isnan(result).any() or torch.isposinf(result).any():
+        raise FloatingPointError("Non-finite result in stable log-matrix product")
     return result
 
 
@@ -323,12 +336,24 @@ class DLightSBMM(DLightSB):
                 logits += log_r[d, target[:, d]]
             return logits
 
+        def objective_terms():
+            source_term = log_normalizer()
+            target_term = torch.logsumexp(target_logits(), dim=1)
+            return source_term, target_term
+
         def objective():
-            return weight0 @ log_normalizer() - weight1 @ torch.logsumexp(target_logits(), dim=1)
+            source_term, target_term = objective_terms()
+            return weight0 @ source_term - weight1 @ target_term
 
         initial_loss = objective()
         if not torch.isfinite(initial_loss):
-            raise ValueError("Initial potential must be positive on all target observations")
+            source_term, target_term = objective_terms()
+            raise FloatingPointError(
+                "Non-finite initial MM objective: "
+                f"log_u_finite={bool(torch.isfinite(log_u).all())}, "
+                f"source_finite={bool(torch.isfinite(source_term).all())}, "
+                f"target_finite={bool(torch.isfinite(target_term).all())}"
+            )
         old_log_c = log_normalizer().clone()
         log_weight0 = weight0.log()
         log_weight1 = weight1.log()
