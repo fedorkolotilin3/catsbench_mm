@@ -89,6 +89,66 @@ def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.where(positive & (z == 0), smallest, z)
 
 
+def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
+    """Compute log(exp(log_a) @ exp(log_b)) without unscaled exponentiation.
+
+    This is the two-dimensional MM counterpart of catsbench.lse_matmul. Row
+    and column maxima make the common path a memory-efficient BLAS product.
+    If that scaled product still underflows, recompute only the affected output
+    rows with an exact logsumexp reduction.
+    """
+    if log_a.ndim != 2 or log_b.ndim != 2 or log_a.shape[1] != log_b.shape[0]:
+        raise ValueError("Expected compatible two-dimensional log matrices")
+    for value in (log_a, log_b):
+        if torch.isnan(value).any() or torch.isposinf(value).any():
+            raise ValueError("Log matrices may contain finite values and -inf only")
+
+    a_max = log_a.amax(dim=1, keepdim=True)
+    b_max = log_b.amax(dim=0, keepdim=True)
+    safe_a_max = torch.where(torch.isfinite(a_max), a_max, 0.0)
+    safe_b_max = torch.where(torch.isfinite(b_max), b_max, 0.0)
+    product = torch.exp(log_a - safe_a_max) @ torch.exp(log_b - safe_b_max)
+    result = product.log() + safe_a_max + safe_b_max
+
+    # A zero scaled dot product is possible when the two maxima have almost
+    # disjoint support. Keep memory bounded by reducing one output row at a time.
+    bad_rows = torch.nonzero((product == 0).any(dim=1), as_tuple=False).flatten()
+    for row in bad_rows.tolist():
+        exact = torch.logsumexp(log_a[row, :, None] + log_b, dim=0)
+        result[row] = torch.where(product[row] == 0, exact, result[row])
+    return result
+
+
+def _simplex_minimum_from_logs(
+    log_a: torch.Tensor, log_b: torch.Tensor
+) -> torch.Tensor:
+    """Solve the simplex subproblem from log coefficients without underflow.
+
+    Multiplying both ``a`` and ``b`` in one row by the same positive constant
+    does not change its minimizer. Row-wise scaling therefore preserves the MM
+    update while keeping the inputs to ``_simplex_minimum`` representable.
+    """
+    if log_a.shape != log_b.shape or log_a.ndim != 2:
+        raise ValueError("log_a and log_b must have the same two-dimensional shape")
+    for value in (log_a, log_b):
+        if torch.isnan(value).any() or torch.isposinf(value).any():
+            raise ValueError("Log coefficients may contain finite values and -inf only")
+
+    shift = torch.maximum(
+        log_a.amax(dim=1, keepdim=True),
+        log_b.amax(dim=1, keepdim=True),
+    )
+    shift = torch.where(torch.isfinite(shift), shift, 0.0)
+    a = torch.exp(log_a - shift)
+    b = torch.exp(log_b - shift)
+
+    # Preserve every mathematically positive count even when its scaled value
+    # lies below the normal floating-point range.
+    smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
+    b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
+    return _simplex_minimum(a, b)
+
+
 class _MMOptimizer(torch.optim.Optimizer):
     """Execute an analytic update through Lightning's optimizer bookkeeping.
 
@@ -236,8 +296,8 @@ class DLightSBMM(DLightSB):
         weight0 = self.log_alpha.new_full((len(source),), 1.0 / len(source))
         weight1 = self.log_alpha.new_full((len(target),), 1.0 / len(target))
         dim, categories, components = self.log_cp_cores.shape
-        q = self.prior.extract_last_cum_matrix(source).exp().permute(1, 0, 2).contiguous()
-        if not torch.isfinite(q).all() or (q <= 0).any():
+        log_q = self.prior.extract_last_cum_matrix(source).permute(1, 0, 2).contiguous()
+        if not torch.isfinite(log_q).all():
             raise ValueError("MM requires a strictly positive finite reference transition")
 
         # Normalize cores AND compensate component weights, preserving q_theta.
@@ -246,18 +306,21 @@ class DLightSBMM(DLightSB):
         log_r -= normalizers
         log_beta = self.log_alpha + normalizers.squeeze(1).sum(dim=0)
         log_beta = log_beta - torch.logsumexp(log_beta, dim=0)
-        r, beta = log_r.exp(), log_beta.exp()
-        if not torch.isfinite(r).all() or not torch.isfinite(beta).all():
+        invalid_log_r = torch.isnan(log_r).any() or torch.isposinf(log_r).any()
+        empty_core = ~torch.isfinite(log_r).any(dim=1).all()
+        if invalid_log_r or empty_core or not torch.isfinite(log_beta).all():
             raise ValueError("Invalid initial potential parameters")
-        u = torch.stack([q[d] @ r[d] for d in range(dim)])  # [D, N0, K]
+        log_u = torch.stack([
+            _stable_log_matmul(log_q[d], log_r[d]) for d in range(dim)
+        ])  # [D, N0, K]
 
         def log_normalizer():
-            return torch.logsumexp(u.log().sum(dim=0) + beta.log(), dim=1)
+            return torch.logsumexp(log_u.sum(dim=0) + log_beta, dim=1)
 
         def target_logits():
-            logits = beta.log().expand(len(target), components).clone()
+            logits = log_beta.expand(len(target), components).clone()
             for d in range(dim):
-                logits += r[d, target[:, d]].log()
+                logits += log_r[d, target[:, d]]
             return logits
 
         def objective():
@@ -267,32 +330,53 @@ class DLightSBMM(DLightSB):
         if not torch.isfinite(initial_loss):
             raise ValueError("Initial potential must be positive on all target observations")
         old_log_c = log_normalizer().clone()
-        gamma = target_logits().softmax(dim=1)
-        weighted_gamma = weight1[:, None] * gamma
-        n = weighted_gamma.sum(dim=0)
-        m = torch.zeros_like(r)
+        log_weight0 = weight0.log()
+        log_weight1 = weight1.log()
+        log_gamma = target_logits().log_softmax(dim=1)
+        log_weighted_gamma = log_weight1[:, None] + log_gamma
+        log_n = torch.logsumexp(log_weighted_gamma, dim=0)
+        log_m = log_r.new_full((dim, categories, components), -torch.inf)
         for d in range(dim):
-            m[d].index_add_(0, target[:, d], weighted_gamma)
+            for category in range(categories):
+                selected = log_weighted_gamma[target[:, d] == category]
+                if len(selected) > 0:
+                    log_m[d, category] = torch.logsumexp(selected, dim=0)
 
         def surrogate():
             # Constant C_t is unnecessary when comparing this same bound.
             ratio = (log_normalizer() - old_log_c).exp()
-            return weight0 @ ratio - torch.xlogy(n, beta).sum() - torch.xlogy(m, r).sum()
+            beta_term = torch.where(
+                torch.isfinite(log_n), log_n.exp() * log_beta, 0.0
+            ).sum()
+            core_term = torch.where(
+                torch.isfinite(log_m), log_m.exp() * log_r, 0.0
+            ).sum()
+            return weight0 @ ratio - beta_term - core_term
 
         bound_before = surrogate().item()
         for _ in range(inner_sweeps):
-            log_product = u.log().sum(dim=0)
-            a = (weight0[:, None] * (log_product - old_log_c[:, None]).exp()).sum(dim=0)
-            beta = _simplex_minimum(a[None], n[None])[0]
+            log_product = log_u.sum(dim=0)
+            log_a = torch.logsumexp(
+                log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
+            )
+            beta = _simplex_minimum_from_logs(log_a[None], log_n[None])[0]
+            log_beta = beta.log()
             for d in range(dim):
-                log_other = u.log().sum(dim=0) - u[d].log()
-                coefficients = (
-                    weight0[:, None]
-                    * (beta.log()[None] + log_other - old_log_c[:, None]).exp()
+                log_other = log_u.sum(dim=0) - log_u[d]
+                log_coefficients = (
+                    log_weight0[:, None]
+                    + log_beta[None]
+                    + log_other
+                    - old_log_c[:, None]
                 )
-                b_linear = q[d].T @ coefficients  # [S,K]
-                r[d] = _simplex_minimum(b_linear.T, m[d].T).T
-                u[d] = q[d] @ r[d]
+                log_b_linear = _stable_log_matmul(
+                    log_q[d].T, log_coefficients
+                )  # [S,K]
+                r_d = _simplex_minimum_from_logs(
+                    log_b_linear.T, log_m[d].T
+                ).T
+                log_r[d] = r_d.log()
+                log_u[d] = _stable_log_matmul(log_q[d], log_r[d])
 
         bound_after, new_loss = surrogate().item(), objective().item()
         previous_loss = initial_loss.item()
@@ -309,7 +393,7 @@ class DLightSBMM(DLightSB):
                 "no candidate weights committed"
             )
 
-        self.log_alpha.copy_(beta.log())
-        self.log_cp_cores.copy_(r.log())
+        self.log_alpha.copy_(log_beta)
+        self.log_cp_cores.copy_(log_r)
         return {"loss": new_loss, "loss_before": previous_loss,
                 "surrogate_decrease": bound_before - bound_after}
