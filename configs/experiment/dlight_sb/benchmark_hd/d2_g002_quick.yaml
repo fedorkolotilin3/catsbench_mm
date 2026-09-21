@@ -3,7 +3,8 @@
 # Fast but statistically useful DLightSB debug/metric comparison.
 # This is intentionally smaller than the paper experiment and must not be used
 # as its final reported result. The matching MM preset uses the same benchmark,
-# model capacity, evaluation sample counts, and total number of training draws.
+# model capacity and evaluation sample counts. Training budgets are method-
+# specific; both presets expose 100 evenly spaced points for comparison plots.
 defaults:
   - /experiment/dlight_sb/benchmark_hd/default
   - override /logger: csv
@@ -12,7 +13,7 @@ defaults:
 data:
   dim: 2
   batch_size: 128
-  num_train_batches: 1024  # 1024 * 128 = 131072 training samples
+  num_train_batches: 10000
   val_batch_size: 32
 
 prior:
@@ -35,15 +36,15 @@ callbacks:
 logger:
   csv:
     version: train
-    flush_logs_every_n_steps: 32
+    flush_logs_every_n_steps: 100
 
 trainer:
   accelerator: gpu
   devices: 1
   max_epochs: 1
-  max_steps: 1024
+  max_steps: 10000
   num_sanity_val_steps: 0
   limit_val_batches: 0
   limit_test_batches: 32
-  log_every_n_steps: 32
-
+  # 10000 / 100 = 100 logged optimization points.
+  log_every_n_steps: 100

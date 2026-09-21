@@ -6,7 +6,6 @@ defaults:
   - _self_
 
 data:
-  # 32 * 4096 = 131072 samples, matching the quick gradient baseline.
   batch_size: 4096
   num_train_batches: 1
 
@@ -20,7 +19,7 @@ method:
 
 callbacks:
   model_checkpoint:
-    every_n_epochs: 32
+    every_n_epochs: 100
     save_top_k: 1
 
 trainer:
@@ -29,7 +28,7 @@ trainer:
   devices: 1
   precision: 64-true
   deterministic: true
-  max_epochs: 32
-  max_steps: 32
+  # One batch per epoch: 100 MM updates and 100 logged comparison points.
+  max_epochs: 100
+  max_steps: 100
   log_every_n_steps: 1
-
