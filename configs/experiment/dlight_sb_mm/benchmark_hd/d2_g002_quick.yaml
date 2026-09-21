@@ -1,0 +1,35 @@
+# @package _global_
+
+# MM counterpart of dlight_sb/benchmark_hd/d2_g002_quick.
+defaults:
+  - /experiment/dlight_sb/benchmark_hd/d2_g002_quick
+  - _self_
+
+data:
+  # 32 * 4096 = 131072 samples, matching the quick gradient baseline.
+  batch_size: 4096
+  num_train_batches: 1
+
+method:
+  _target_: src.methods.dlight_sb_mm.DLightSBMM
+  optimizer: null
+  scheduler: null
+  entropy_lambda: 0
+  inner_sweeps: 1
+  tol: null
+
+callbacks:
+  model_checkpoint:
+    every_n_epochs: 32
+    save_top_k: 1
+
+trainer:
+  # run_mm_train_test.sh may override these with --device gpu.
+  accelerator: cpu
+  devices: 1
+  precision: 64-true
+  deterministic: true
+  max_epochs: 32
+  max_steps: 32
+  log_every_n_steps: 1
+

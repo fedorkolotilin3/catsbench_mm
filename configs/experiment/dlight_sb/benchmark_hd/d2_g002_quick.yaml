@@ -1,0 +1,49 @@
+# @package _global_
+
+# Fast but statistically useful DLightSB debug/metric comparison.
+# This is intentionally smaller than the paper experiment and must not be used
+# as its final reported result. The matching MM preset uses the same benchmark,
+# model capacity, evaluation sample counts, and total number of training draws.
+defaults:
+  - /experiment/dlight_sb/benchmark_hd/default
+  - override /logger: csv
+  - _self_
+
+data:
+  dim: 2
+  batch_size: 128
+  num_train_batches: 1024  # 1024 * 128 = 131072 training samples
+  val_batch_size: 32
+
+prior:
+  prior_type: gaussian
+  alpha: 0.02
+
+method:
+  num_potentials: 64
+  distr_init: samples
+
+callbacks:
+  # Plotter integrations target W&B/Comet; quick runs use portable CSV output.
+  plotter_callback: null
+  metric_callback:
+    # 32 test batches provide 32 conditioning points and 8192 draws in total.
+    num_cond_samples: 256
+  model_checkpoint:
+    save_top_k: 1
+
+logger:
+  csv:
+    version: train
+    flush_logs_every_n_steps: 25
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 1
+  max_steps: 1024
+  num_sanity_val_steps: 0
+  limit_val_batches: 0
+  limit_test_batches: 32
+  log_every_n_steps: 25
+
