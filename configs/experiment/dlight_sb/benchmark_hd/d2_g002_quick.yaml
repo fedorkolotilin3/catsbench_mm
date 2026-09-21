@@ -35,7 +35,7 @@ callbacks:
 logger:
   csv:
     version: train
-    flush_logs_every_n_steps: 25
+    flush_logs_every_n_steps: 32
 
 trainer:
   accelerator: gpu
@@ -45,5 +45,5 @@ trainer:
   num_sanity_val_steps: 0
   limit_val_batches: 0
   limit_test_batches: 32
-  log_every_n_steps: 25
+  log_every_n_steps: 32
 

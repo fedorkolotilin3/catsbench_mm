@@ -3,4 +3,4 @@ csv:
   save_dir: ${paths.output_dir}
   name: metrics
   version: 0
-  flush_logs_every_n_steps: 50
+  flush_logs_every_n_steps: 32
