@@ -55,7 +55,8 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
-  logger.csv.version=train
+  logger.csv.version=train \
+  '++callbacks.plotter_callback=null'
 
 echo "[mm] testing last checkpoint"
 bash "${SCRIPT_DIR}/run_colab.sh" \
@@ -64,6 +65,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
-  logger.csv.version=test
+  logger.csv.version=test \
+  '++callbacks.plotter_callback=null'
 
 echo "[mm] train and test completed"

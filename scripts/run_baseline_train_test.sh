@@ -32,7 +32,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   logger=csv \
   logger.csv.version=train \
-  '~callbacks.plotter_callback'
+  '++callbacks.plotter_callback=null'
 
 echo "[baseline] testing last checkpoint"
 bash "${SCRIPT_DIR}/run_colab.sh" \
@@ -41,6 +41,6 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   logger=csv \
   logger.csv.version=test \
-  '~callbacks.plotter_callback'
+  '++callbacks.plotter_callback=null'
 
 echo "[baseline] train and test completed"
