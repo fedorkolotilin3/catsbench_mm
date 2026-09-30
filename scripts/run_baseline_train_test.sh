@@ -24,7 +24,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "${PROJECT_ROOT}"
-export LSE_BACKEND="${LSE_BACKEND:-any}"
 export CATS_MPLBACKEND="${CATS_MPLBACKEND:-Agg}"
 
 echo "[baseline] training ${EXPERIMENT}"

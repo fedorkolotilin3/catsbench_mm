@@ -11,7 +11,6 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
-export LSE_BACKEND="${LSE_BACKEND:-any}"
 export MPLBACKEND="${CATS_MPLBACKEND:-Agg}"
 export PYTHONUNBUFFERED=1
 

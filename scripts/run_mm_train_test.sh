@@ -31,11 +31,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${MM_DEVICE}" in
-  cpu)
-    LSE_BACKEND_VALUE=cpu
-    ;;
-  gpu)
-    LSE_BACKEND_VALUE=any
+  cpu|gpu)
     ;;
   *)
     echo "Unsupported MM device '${MM_DEVICE}'; expected cpu or gpu" >&2
@@ -44,7 +40,6 @@ case "${MM_DEVICE}" in
 esac
 
 cd "${PROJECT_ROOT}"
-export LSE_BACKEND="${LSE_BACKEND_VALUE}"
 export CATS_MPLBACKEND="${CATS_MPLBACKEND:-Agg}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${MM_THREADS}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${MM_THREADS}}"
