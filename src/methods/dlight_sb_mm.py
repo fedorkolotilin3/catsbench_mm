@@ -25,70 +25,39 @@ import torch
 from .dlight_sb import DLightSB
 
 
-def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Minimize a*z - b*log(z) on each row's simplex, including b=0.
+def _nonnegative_minimum_from_logs(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    current_log_z: torch.Tensor,
+) -> torch.Tensor:
+    """Minimize ``a*z - b*log(z)`` coordinatewise over ``z >= 0``.
 
-    Inputs are finite float64 tensors [number_of_blocks, block_size].
-    The Lagrange multiplier is found by bisection; zero-count coordinates
-    receive residual mass only when their linear coefficient is minimal.
+    The explicit solution is ``z = b / a`` when both coefficients are
+    positive. Inputs and the result stay in the log domain. If ``a > 0`` and
+    ``b = 0``, the minimizer is exactly zero. If ``a = b = 0``, the objective
+    is constant in that coordinate and its current value is preserved. The
+    remaining case, ``a = 0 < b``, has no finite minimizer.
     """
-    if a.shape != b.shape or a.ndim != 2:
-        raise ValueError("a and b must have the same two-dimensional shape")
-    if not torch.isfinite(a).all() or not torch.isfinite(b).all() or (b < 0).any():
-        raise ValueError("Expected finite coefficients and nonnegative counts")
+    if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
+        raise ValueError("log_a, log_b and current_log_z must have the same shape")
+    for value in (log_a, log_b, current_log_z):
+        if torch.isnan(value).any() or torch.isposinf(value).any():
+            raise ValueError("Log parameters may contain finite values and -inf only")
 
-    positive = b > 0
-    has_counts = positive.any(dim=1, keepdim=True)
-    minimum = a.masked_fill(~positive, torch.inf).amin(dim=1, keepdim=True)
-    minimum = torch.where(has_counts, minimum, a.amin(dim=1, keepdim=True))
-    shifted = a - minimum
-    # Solve for delta = lambda + min(a on positive-count coordinates).
-    # The root can be arbitrarily close to zero when counts are tiny.
-    # At the root: sum(b where shifted=0) <= delta <= sum(b).
-    # Bisect in log(delta), so 100 iterations resolve relative accuracy even
-    # across the full float64 exponent range. Linear bisection would fail here.
-    lower = b.masked_fill(shifted != 0, 0).sum(dim=1, keepdim=True)
-    upper = b.sum(dim=1, keepdim=True)
-    lo = torch.where(has_counts, lower, torch.ones_like(lower)).log()
-    hi = torch.where(has_counts, upper, torch.ones_like(upper)).log()
-    for _ in range(100):
-        log_mid = (lo + hi) / 2
-        mid = log_mid.exp()
-        denominator = torch.where(positive, shifted + mid, torch.ones_like(a))
-        mass = (b / denominator).sum(dim=1, keepdim=True)
-        above = mass > 1
-        lo = torch.where(above, log_mid, lo)
-        hi = torch.where(above, hi, log_mid)
+    positive_a = torch.isfinite(log_a)
+    positive_b = torch.isfinite(log_b)
+    if ((~positive_a) & positive_b).any():
+        raise FloatingPointError(
+            "The nonnegative MM block is unbounded: a=0 and b>0"
+        )
 
-    delta = ((lo + hi) / 2).exp()
-    minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
-    boundary_delta = minimum - minimum_zero
-    boundary = has_counts & (boundary_delta > delta)
-    delta = torch.where(boundary, boundary_delta, delta)
-    denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
-    z = b / denominator
-
-    # Interior root: correct only bisection roundoff, not an arbitrary update.
-    interior = has_counts & ~boundary
-    mass = z.sum(dim=1, keepdim=True)
-    z = torch.where(interior, z / mass.clamp_min(torch.finfo(a.dtype).tiny), z)
-    zero_minima = ~positive & (a == minimum_zero)
-    residual = (1 - z.sum(dim=1, keepdim=True)).clamp_min(0)
-    z = z + torch.where(
-        boundary,
-        zero_minima * residual / zero_minima.sum(dim=1, keepdim=True).clamp_min(1),
-        torch.zeros_like(z),
-    )
-    # With no logarithmic terms the problem is linear.
-    minima = a == a.amin(dim=1, keepdim=True)
-    linear_solution = minima.to(a.dtype) / minima.sum(dim=1, keepdim=True)
-    z = torch.where(has_counts, z, linear_solution)
-    # Keep the potential strictly positive between updates. Exact empirical MM
-    # may put zero mass on cells absent from the current random batch; a fresh
-    # batch can contain those cells and would then have log-potential -inf.
-    # The smallest representable float is a numerical guard, not a pseudo-count.
-    smallest = torch.nextafter(a.new_tensor(0.0), a.new_tensor(1.0))
-    return torch.where(z == 0, smallest, z)
+    log_z = current_log_z.clone()
+    interior = positive_a & positive_b
+    log_z = torch.where(interior, log_b - log_a, log_z)
+    log_z = torch.where(positive_a & ~positive_b, -torch.inf, log_z)
+    if torch.isnan(log_z).any() or torch.isposinf(log_z).any():
+        raise FloatingPointError("Non-finite explicit MM block update")
+    return log_z
 
 
 def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
@@ -132,36 +101,6 @@ def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor
     return result
 
 
-def _simplex_minimum_from_logs(
-    log_a: torch.Tensor, log_b: torch.Tensor
-) -> torch.Tensor:
-    """Solve the simplex subproblem from log coefficients without underflow.
-
-    Multiplying both ``a`` and ``b`` in one row by the same positive constant
-    does not change its minimizer. Row-wise scaling therefore preserves the MM
-    update while keeping the inputs to ``_simplex_minimum`` representable.
-    """
-    if log_a.shape != log_b.shape or log_a.ndim != 2:
-        raise ValueError("log_a and log_b must have the same two-dimensional shape")
-    for value in (log_a, log_b):
-        if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log coefficients may contain finite values and -inf only")
-
-    shift = torch.maximum(
-        log_a.amax(dim=1, keepdim=True),
-        log_b.amax(dim=1, keepdim=True),
-    )
-    shift = torch.where(torch.isfinite(shift), shift, 0.0)
-    a = torch.exp(log_a - shift)
-    b = torch.exp(log_b - shift)
-
-    # Preserve every mathematically positive count even when its scaled value
-    # lies below the normal floating-point range.
-    smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
-    b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
-    return _simplex_minimum(a, b)
-
-
 class _MMOptimizer(torch.optim.Optimizer):
     """Execute an analytic update through Lightning's optimizer bookkeeping.
 
@@ -183,7 +122,8 @@ class DLightSBMM(DLightSB):
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. This is the simple bound in theory.md, not the newer mm.md.
+    statistics. Parameters are constrained only to be nonnegative; each block
+    therefore has the explicit coordinatewise minimizer ``z = b / a``.
     """
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
@@ -196,14 +136,16 @@ class DLightSBMM(DLightSB):
             raise ValueError("tol must be None or a finite nonnegative number")
         self.save_hyperparameters("inner_sweeps", "tol")
         self.automatic_optimization = False
-        self.double()
+        self.to(dtype=self.prior.dtype)
 
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
     def on_train_start(self):
-        if self.dtype != torch.float64:
-            raise ValueError("Use trainer precision='64-true' for MM")
+        if self.dtype not in (torch.float32, torch.float64):
+            raise ValueError("MM requires float32 or float64 parameters")
+        if self.prior.dtype != self.dtype:
+            raise ValueError("MM parameters and prior must use the same dtype")
         if self.hparams.tol is not None and self.trainer.num_training_batches != 1:
             raise ValueError("MM tolerance requires one full-dataset batch per epoch")
 
@@ -237,7 +179,7 @@ class DLightSBMM(DLightSB):
     def from_model(cls, model: DLightSB, *, state_dict=None, tol=None):
         """Copy a DLightSB; optionally restore its pre-training weights.
 
-        The prior is copied too, so float64 conversion never changes model.
+        The copied solver preserves the model's device and floating-point dtype.
         """
         if model.hparams.entropy_lambda != 0:
             raise ValueError("MM supports entropy_lambda=0 only")
@@ -248,10 +190,10 @@ class DLightSBMM(DLightSB):
         )
         with torch.device(model.device):
             solver = cls(
-                prior=deepcopy(model.prior).double(),
+                prior=deepcopy(model.prior),
                 optimizer=None, scheduler=None, tol=tol,
                 **{key: model.hparams[key] for key in keys},
-            ).double()
+            ).to(device=model.device, dtype=model.dtype)
         solver.load_state_dict(model.state_dict() if state_dict is None else state_dict)
         solver._did_weight_init = True
         return solver
@@ -264,7 +206,6 @@ class DLightSBMM(DLightSB):
         """
         if max_iter < 1 or inner_sweeps < 1 or tol < 0:
             raise ValueError("Require max_iter >= 1, inner_sweeps >= 1 and tol >= 0")
-        self.double()
         self.history_, self.surrogate_decreases_ = [], []
         for _ in range(max_iter):
             info = self.mm_step(x0, x1, inner_sweeps=inner_sweeps)
@@ -286,8 +227,10 @@ class DLightSBMM(DLightSB):
         candidate. No persistent data cache: another batch/checkpoint cannot
         reuse stale Q.
         """
-        if self.dtype != torch.float64 or self.prior.dtype != torch.float64:
-            raise ValueError("MM requires float64 parameters and prior")
+        if self.dtype not in (torch.float32, torch.float64):
+            raise ValueError("MM requires float32 or float64 parameters")
+        if self.prior.dtype != self.dtype:
+            raise ValueError("MM parameters and prior must use the same dtype")
         if self.hparams.entropy_lambda != 0:
             raise ValueError("MM supports entropy_lambda=0 only")
         inner_sweeps = self.hparams.inner_sweeps if inner_sweeps is None else inner_sweeps
@@ -313,15 +256,13 @@ class DLightSBMM(DLightSB):
         if not torch.isfinite(log_q).all():
             raise ValueError("MM requires a strictly positive finite reference transition")
 
-        # Normalize cores AND compensate component weights, preserving q_theta.
+        # Work with the model's native nonnegative, unnormalized parameters.
+        # A value of -inf is an exact zero and is allowed by the MM domain.
         log_r = self.log_cp_cores.detach().clone()
-        normalizers = torch.logsumexp(log_r, dim=1, keepdim=True)
-        log_r -= normalizers
-        log_beta = self.log_alpha + normalizers.squeeze(1).sum(dim=0)
-        log_beta = log_beta - torch.logsumexp(log_beta, dim=0)
+        log_beta = self.log_alpha.detach().clone()
         invalid_log_r = torch.isnan(log_r).any() or torch.isposinf(log_r).any()
-        empty_core = ~torch.isfinite(log_r).any(dim=1).all()
-        if invalid_log_r or empty_core or not torch.isfinite(log_beta).all():
+        invalid_log_beta = torch.isnan(log_beta).any() or torch.isposinf(log_beta).any()
+        if invalid_log_r or invalid_log_beta or not torch.isfinite(log_beta).any():
             raise ValueError("Invalid initial potential parameters")
         log_u = torch.stack([
             _stable_log_matmul(log_q[d], log_r[d]) for d in range(dim)
@@ -384,10 +325,14 @@ class DLightSBMM(DLightSB):
             log_a = torch.logsumexp(
                 log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
             )
-            beta = _simplex_minimum_from_logs(log_a[None], log_n[None])[0]
-            log_beta = beta.log()
+            log_beta = _nonnegative_minimum_from_logs(log_a, log_n, log_beta)
             for d in range(dim):
-                log_other = log_u.sum(dim=0) - log_u[d]
+                # Do not form sum(log_u) - log_u[d]: exact-zero components
+                # would produce -inf - -inf = NaN. Sum the other dimensions.
+                log_other = sum(
+                    (log_u[e] for e in range(dim) if e != d),
+                    torch.zeros_like(log_u[d]),
+                )
                 log_coefficients = (
                     log_weight0[:, None]
                     + log_beta[None]
@@ -397,15 +342,15 @@ class DLightSBMM(DLightSB):
                 log_b_linear = _stable_log_matmul(
                     log_q[d].T, log_coefficients
                 )  # [S,K]
-                r_d = _simplex_minimum_from_logs(
-                    log_b_linear.T, log_m[d].T
+                log_r[d] = _nonnegative_minimum_from_logs(
+                    log_b_linear.T, log_m[d].T, log_r[d].T
                 ).T
-                log_r[d] = r_d.log()
                 log_u[d] = _stable_log_matmul(log_q[d], log_r[d])
 
         bound_after, new_loss = surrogate().item(), objective().item()
         previous_loss = initial_loss.item()
-        allowance = 1e-10 * max(1.0, abs(previous_loss), abs(bound_before))
+        scale = max(1.0, abs(previous_loss), abs(bound_before))
+        allowance = 64 * torch.finfo(self.dtype).eps * scale
         if (
             not math.isfinite(bound_after) or not math.isfinite(new_loss)
             or bound_after > bound_before + allowance

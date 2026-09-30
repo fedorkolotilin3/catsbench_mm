@@ -1,0 +1,28 @@
+_target_: src.methods.c2sbm.C2SBM
+
+model_forward: ${model}
+model_backward: ${model}
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 1e-4
+  betas: [0.95, 0.99]
+
+ema:
+  _target_: torch_ema.ExponentialMovingAverage
+  _partial_: true
+  decay: 0.999
+
+prior: ${prior}
+
+num_timesteps: ${prior.num_timesteps}
+num_first_iterations: 10
+kl_loss_coeff: 1.0
+ce_loss_coeff: 0
+mse_loss_coeff: 0
+use_mini_batch: false
+ignore_index: -100
+accumulate_grad_batches: 1
+argmax_mode: true
+tau: 1.0

@@ -31,13 +31,14 @@ data:
     num_categories: ${data.num_categories}
 
 prior:
+  implementation: normalized
   alpha: 0.02
   prior_type: gaussian
   num_timesteps: 15
   num_skip_steps: 8
 
 method:
-  num_potentials: 10
+  num_potentials: 1000
   distr_init: uniform
 
 trainer:

@@ -10,10 +10,10 @@ prior: ${prior}
 
 dim: ${data.dim}
 num_categories: ${data.num_categories}
-num_potentials: 10
+num_potentials: 16
 num_timesteps: ${prior.num_timesteps}
 distr_init: uniform
 entropy_warmup_steps: 20000
 entropy_lambda: 0 # 10
-sample_prob: 0.9
+sample_prob: 0.99
 tau: 1.0

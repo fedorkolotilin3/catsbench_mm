@@ -35,6 +35,7 @@ model:
   layers: [128, 128, 128]
 
 prior:
+  implementation: normalized
   alpha: 0.02
   prior_type: gaussian
   num_timesteps: 15

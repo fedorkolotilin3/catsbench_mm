@@ -12,6 +12,7 @@ sleep $((SLURM_ARRAY_TASK_ID * 5))
 source activate dot_bench
 
 SEED=5
+METHOD=alpha_csbm # (csbm, alpha_csbm, dlight_sb, dlight_sb_m)
 EXPERIMENTS=(t2 t4 t10 t25 t50 t100)
 EXPERIMENT="${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}"
 
@@ -25,4 +26,4 @@ fi
 
 python -m src.run \
   seed=${SEED} data.num_workers=4 data.pin_memory=true \
-  experiment=alpha_csbm/colored_mnist/${EXPERIMENT}
+  experiment=${METHOD}/colored_mnist/${EXPERIMENT}

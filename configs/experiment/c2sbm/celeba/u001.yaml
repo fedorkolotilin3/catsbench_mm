@@ -1,0 +1,8 @@
+# @package _global_
+
+defaults:
+  - c2sbm/celeba/default
+  - _self_
+
+prior:
+  alpha: 0.01

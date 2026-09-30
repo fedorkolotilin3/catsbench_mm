@@ -1,0 +1,55 @@
+# @package _global_
+
+defaults:
+  - override /data: celeba
+  - override /model: latent_transformer
+  - override /method: c2sbm
+  - override /callbacks:
+    - model_checkpoint
+    - model_summary
+    - progress_bar
+    - image_metrics
+    - image_plotter
+  - override /trainer: multi_gpu
+  - _self_
+
+prior:
+  implementation: normalized
+  alpha: ???
+  # These values are calculated to match
+  # num_timesteps=100 and num_skip_steps=1
+  eps: 5.180131997141631e-05
+  prior_type: uniform
+  num_timesteps: 1
+  num_skip_steps: 50.5
+
+method:
+  optimizer:
+    lr: 0.0004
+  ema:
+    decay: 0.999
+  use_mini_batch: false
+  num_first_iterations: 20
+  kl_loss_coeff: 1.0
+  ce_loss_coeff: 0.001
+  mse_loss_coeff: 0
+  ignore_index: -100
+  accumulate_grad_batches: 1
+  argmax_mode: true
+
+trainer:
+  devices: 4
+  max_epochs: 46
+  limit_train_batches: 1.0
+  val_check_interval: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+
+callbacks:
+  image_plotter:
+    input_label: Male
+    target_label: Female
+
+logger:
+  wandb:
+    project: c2sbm

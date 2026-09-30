@@ -1,61 +1,11 @@
 # @package _global_
 
-# The only MM experiment configuration. It inherits the published DLightSB
-# d2/Gaussian-0.02 benchmark and changes only the optimizer implementation,
-# training batch protocol, numerical precision, and local logger.
 defaults:
-  - /experiment/dlight_sb/benchmark_hd/default
-  - override /logger: csv
-  - _self_
+  - dlight_sb_mm/benchmark_hd/default
 
 data:
   dim: 2
-  batch_size: 10000
-  num_train_batches: 1
-  # Keep evaluation identical to the reproduced gradient baseline.
-  val_batch_size: 128
 
 prior:
   prior_type: gaussian
   alpha: 0.02
-
-method:
-  _target_: src.methods.dlight_sb_mm.DLightSBMM
-  optimizer: null
-  scheduler: null
-  entropy_lambda: 0
-  inner_sweeps: 1
-  # Every update receives a fresh population sample, so losses from consecutive
-  # batches cannot be used by the fixed-sample convergence rule.
-  tol: null
-
-callbacks:
-  # The stock plotter supports WandB/Comet, while this experiment is CSV-only.
-  plotter_callback: null
-  metric_callback:
-    num_cond_samples: 1000
-  model_checkpoint:
-    # Produce last.ckpt for the separate test command without 100 checkpoints.
-    every_n_epochs: 100
-    save_top_k: 1
-
-logger:
-  wandb: null
-  csv:
-    version: train
-    flush_logs_every_n_steps: 1
-
-trainer:
-  accelerator: cpu
-  devices: 1
-  precision: 64-true
-  deterministic: true
-  max_epochs: 100
-  max_steps: 100
-  limit_train_batches: 1.0
-  num_sanity_val_steps: 0
-  limit_val_batches: 0
-  limit_test_batches: 1.0
-  accumulate_grad_batches: 1
-  gradient_clip_val: null
-  log_every_n_steps: 1

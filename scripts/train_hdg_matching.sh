@@ -11,7 +11,7 @@ source activate dot_bench
 set -e
 
 SEED=5
-METHOD=alpha_csbm # (dlight_sb_m csbm alpha_csbm)
+METHOD=alpha_csbm # (dlight_sb_m csbm alpha_csbm c2sbm)
 DIMS=(2 16 64)
 BENCHMARKS=(g002 g005 u0005 u001)
 VARIANTS=(t63_kl t63_mse t15_kl t15_mse)

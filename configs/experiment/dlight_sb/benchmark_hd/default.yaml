@@ -23,13 +23,15 @@ data:
   pin_memory: false
 
 prior:
+  implementation: triton
   alpha: ???
   prior_type: ???
+  eps: 0
   num_timesteps: 15
   num_skip_steps: 8
 
 method:
-  num_potentials: 1000 # 64 with entropy regularization
+  num_potentials: 1000
   distr_init: samples
 
 trainer:

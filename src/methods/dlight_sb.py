@@ -142,7 +142,7 @@ class DLightSB(BaseMethod):
             init_samples = None
             if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'benchmark'):
                 benchmark = self.trainer.datamodule.benchmark
-                init_samples: torch.Tensor = benchmark.sample_input(self.hparams.num_potentials)
+                init_samples: torch.Tensor = benchmark.sample_target(self.hparams.num_potentials)
                 init_samples = init_samples.flatten(start_dim=1) # (num_potentials, dim)
             self.init_weights(init_samples)
 

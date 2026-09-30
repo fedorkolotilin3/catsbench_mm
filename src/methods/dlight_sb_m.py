@@ -111,20 +111,6 @@ class DLightSB_M(BaseMethod):
 
         self._did_weight_init = True
 
-    def load_state_dict(self, state_dict, strict: bool = True):
-        ignored = {"c2st.weight", "c2st.bias", "cond_c2st.weight", "cond_c2st.bias"}
-        filtered = {k: v for k, v in state_dict.items() if k not in ignored}
-        missing, unexpected = BaseMethod.load_state_dict(self, filtered, strict=False)
-
-        filtered_out = [k for k in state_dict if k in ignored]
-        if filtered_out:
-            log.info(f"Ignored keys during load_state_dict: {filtered_out}")
-        if missing:
-            log.info(f"Missing keys after load (expected): {missing}")
-        if unexpected:
-            log.info(f"Unexpected keys (ignored by strict=False): {unexpected}")
-        return missing, unexpected
-    
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         checkpoint['iteration'] = self.iteration
 
@@ -162,7 +148,7 @@ class DLightSB_M(BaseMethod):
             init_samples = None
             if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'benchmark'):
                 benchmark = self.trainer.datamodule.benchmark
-                init_samples: torch.Tensor = benchmark.sample_input(self.hparams.num_potentials)
+                init_samples: torch.Tensor = benchmark.sample_target(self.hparams.num_potentials)
                 init_samples = init_samples.flatten(start_dim=1) # (num_potentials, dim)
             self.init_weights(init_samples)
 

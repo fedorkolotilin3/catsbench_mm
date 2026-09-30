@@ -1,0 +1,9 @@
+_target_: src.methods.models.causal_transformer.CausalDenoiserTransformer
+input_dim: ${data.dim}
+num_categories: ${data.num_categories}
+num_timesteps: ${prior.num_timesteps}
+hidden_dim: 56
+num_layers: 1
+num_heads: 4
+feedforward_dim: 112
+dropout: 0.0

@@ -1,0 +1,343 @@
+# MM-алгоритм в задаче оптимизации DLightSB
+
+Используется параметризация DLightSB из [1, §3.2, (8)–(10)] и целевая функция из [1, §4.3, предложение 4.1, (17)]. Модификация заменяет градиентное обучение последовательной минимизацией мажоранты (majorization–minimization, MM). Дополнительная регуляризация отсутствует.
+
+## 1. Постановка
+
+Пусть $\mathcal X=\{0,\ldots,S-1\}^D$ и
+
+$$
+q^{\mathrm{ref}}(y\mid x)=\prod_{d=1}^D Q_d[x^d,y^d],
+\qquad Q_d[a,s]>0,\qquad \sum_sQ_d[a,s]=1.
+\tag{1}
+$$
+
+Здесь $Q_d$ — полный переход опорного процесса от начального до конечного момента, а не одношаговый переход. Обозначим независимые маргинальные выборки через $\{x_i\}_{i=1}^{N_0}$ и $\{y_j\}_{j=1}^{N_1}$.
+
+$$
+\theta=(\beta,r),\qquad \beta_k\ge0,\qquad r_k^d[s]\ge0,
+\qquad
+v_\theta(y)=\sum_{k=1}^K\beta_k\prod_{d=1}^Dr_k^d[y^d].
+\tag{2}
+$$
+
+Ограничения $\sum_k\beta_k=1$ и $\sum_s r_k^d[s]=1$ не вводятся. Нормировка условного распределения обеспечивается функцией $c_\theta$:
+
+$$
+c_\theta(x)=\sum_{y\in\mathcal X}q^{\mathrm{ref}}(y\mid x)v_\theta(y),
+\qquad
+q_\theta(y\mid x)=\frac{q^{\mathrm{ref}}(y\mid x)v_\theta(y)}{c_\theta(x)}.
+\tag{3}
+$$
+
+По [1, предложение 4.1], для совместного распределения $q_\theta(x,y)=p_0(x)q_\theta(y\mid x)$:
+
+$$
+\mathrm{KL}(q^*\Vert q_\theta)=L(\theta)-L^*,\qquad
+L(\theta)=\mathbb E_{p_0}\log c_\theta(x)-\mathbb E_{p_1}\log v_\theta(y),
+\tag{4}
+$$
+
+где $L^*$ не зависит от $\theta$. Рассматриваем эмпирическую задачу
+
+$$
+\boxed{
+\min_{\theta\in\mathcal D}\widehat L(\theta),\qquad
+\widehat L(\theta)=\frac1{N_0}\sum_i\log c_\theta(x_i)
+-\frac1{N_1}\sum_j\log v_\theta(y_j),
+}
+\tag{5}
+$$
+
+$$
+\mathcal D=\{(\beta,r)\succeq0:
+c_\theta(x_i)>0\ \forall i,\quad v_\theta(y_j)>0\ \forall j\}.
+$$
+
+Строго положительная инициализация принадлежит $\mathcal D$. Нули параметров далее допускаются. Введём сокращения:
+
+$$
+Q_{ids}=Q_d[x_i^d,s],\quad
+u_{ikd}=\sum_sQ_{ids}r_k^d[s],\quad
+c_i=\sum_k\beta_k\prod_du_{ikd},\quad
+h_{jk}=\beta_k\prod_dr_k^d[y_j^d],\quad v_j=\sum_kh_{jk}.
+\tag{6}
+$$
+
+## 2. Построение мажоранты
+
+### Касательная оценка первого слагаемого
+
+В начале итерации фиксируем $c_i^{(t)}=c_i(\theta^{(t)})$. Используем касательную оценку из [2, §3.1, (8)–(9)]:
+
+$$
+\log z\le\log\psi+\frac{z-\psi}{\psi},\qquad z,\psi>0.
+\tag{7}
+$$
+
+Её корректность и условие равенства следуют из
+
+$$
+\log\psi+\frac{z-\psi}{\psi}-\log z
+=\rho-1-\log\rho\ge0,\quad \rho=z/\psi,
+\qquad
+\rho-1-\log\rho=0\iff\rho=1.
+\tag{8}
+$$
+
+При $z=c_i(\theta)$ и $\psi=c_i^{(t)}$ получаем
+
+$$
+\frac1{N_0}\sum_i\log c_i(\theta)
+\le\frac1{N_0}\sum_i
+\left(\frac{c_i(\theta)}{c_i^{(t)}}+\log c_i^{(t)}-1\right).
+\tag{9}
+$$
+
+Это применение той же касательной конструкции, что и TUBE, к положительной функции $c_\theta$; интерпретация $c_\theta$ как вероятности не требуется. В отличие от оценивания evidence в [2], здесь $c_i$ вычисляется точно по CP-параметризации, а точка касания выбирается заново на каждой MM-итерации. Оценка аффинна по $c_i$, но не по всему вектору $\theta$ одновременно.
+
+### Оценка второго слагаемого
+
+Определим
+
+$$
+\gamma_{jk}^{(t)}=\frac{h_{jk}^{(t)}}{v_j^{(t)}},
+\qquad \gamma_{jk}^{(t)}\ge0,\qquad\sum_k\gamma_{jk}^{(t)}=1.
+\tag{10}
+$$
+
+По неравенству Йенсена ([примечание 1](#note-jensen)):
+
+$$
+-\log v_j(\theta)
+\le\sum_k\gamma_{jk}^{(t)}
+\bigl(\log\gamma_{jk}^{(t)}-\log h_{jk}(\theta)\bigr).
+\tag{11}
+$$
+
+Разность правой и левой частей равна
+
+$$
+\mathrm{KL}\!\left(\gamma_j^{(t)}\,\middle\|\,
+\left(\frac{h_{jk}(\theta)}{v_j(\theta)}\right)_{k=1}^K\right)\ge0,
+\tag{12}
+$$
+
+и обращается в нуль при $\theta=\theta^{(t)}$.
+
+Введём коэффициенты
+
+$$
+n_k^{(t)}=\frac1{N_1}\sum_j\gamma_{jk}^{(t)},\qquad
+m_{kds}^{(t)}=\frac1{N_1}\sum_{j:\,y_j^d=s}\gamma_{jk}^{(t)},
+\quad \sum_kn_k^{(t)}=1,\quad\sum_sm_{kds}^{(t)}=n_k^{(t)}.
+\tag{13}
+$$
+
+Группировка по категориям даёт ([примечание 2](#note-grouping))
+
+$$
+-\frac1{N_1}\sum_{j,k}\gamma_{jk}^{(t)}\log h_{jk}(\theta)
+=-\sum_kn_k^{(t)}\log\beta_k
+-\sum_{k,d,s}m_{kds}^{(t)}\log r_k^d[s].
+\tag{14}
+$$
+
+### Полная оценка
+
+$$
+\boxed{
+\begin{aligned}
+G_t(\theta)
+={}&\frac1{N_0}\sum_i
+\frac{\sum_k\beta_k\prod_du_{ikd}}{c_i^{(t)}}
+-\sum_kn_k^{(t)}\log\beta_k\\
+&-\sum_{k,d,s}m_{kds}^{(t)}\log r_k^d[s]+C_t,
+\end{aligned}}
+\tag{15}
+$$
+
+$$
+C_t=\frac1{N_0}\sum_i(\log c_i^{(t)}-1)
++\frac1{N_1}\sum_{j,k}\gamma_{jk}^{(t)}\log\gamma_{jk}^{(t)}.
+\tag{16}
+$$
+
+Из (9)–(14):
+
+$$
+\boxed{\widehat L(\theta)\le G_t(\theta),\qquad
+G_t(\theta^{(t)})=\widehat L(\theta^{(t)}).}
+\tag{17}
+$$
+
+При положительных параметрах также совпадают градиенты в точке касания: $\nabla G_t(\theta^{(t)})=\nabla\widehat L(\theta^{(t)})$. ([примечание 3](#note-gradient))
+
+## 3. Явная минимизация по блокам
+
+Внутри внешней итерации $c^{(t)},\gamma^{(t)},n^{(t)},m^{(t)}$ фиксированы. Параметры без индекса $(t)$ обозначают текущие значения после уже выполненных блочных обновлений.
+
+### Общая подзадача
+
+Каждая блочная задача имеет вид
+
+$$
+\min_{z\succeq0}F(z),\qquad
+F(z)=\sum_\ell a_\ell z_\ell
+-\sum_{\ell:\,b_\ell>0}b_\ell\log z_\ell,
+\qquad a_\ell,b_\ell\ge0.
+\tag{18}
+$$
+
+При $a_\ell,b_\ell>0$:
+
+$$
+\frac{\partial F}{\partial z_\ell}=a_\ell-\frac{b_\ell}{z_\ell}=0,
+\qquad
+\frac{\partial^2F}{\partial z_\ell^2}=\frac{b_\ell}{z_\ell^2}>0,
+\qquad
+\boxed{z_\ell^*=b_\ell/a_\ell.}
+\tag{19}
+$$
+
+Строгая выпуклость и расходимость $a_\ell z-b_\ell\log z$ к $+\infty$ при $z\downarrow0$ и $z\to\infty$ доказывают существование и единственность этого минимума. Полное решение:
+
+$$
+\operatorname*{argmin}_{z\ge0}(az-b\log z)=
+\begin{cases}
+\{b/a\},&a>0,\ b>0,\\
+\{0\},&a>0,\ b=0,\\
+[0,+\infty),&a=b=0,\\
+\varnothing,&a=0,\ b>0\quad(\inf=-\infty).
+\end{cases}
+\tag{20}
+$$
+
+При $b=0$ логарифмическое слагаемое отсутствует. При $a=b=0$ сохраняем прежнее значение координаты. Связующего ограничения $\mathbf1^\top z=1$ нет, поэтому множитель Лагранжа и его численный поиск не требуются.
+
+### Обновление весов
+
+При фиксированных ядрах:
+
+$$
+A_k=\frac1{N_0}\sum_i\frac{\prod_du_{ikd}}{c_i^{(t)}},\qquad
+G_t(\beta,r)=\sum_kA_k\beta_k-\sum_kn_k^{(t)}\log\beta_k
++\mathrm{const}_{\beta}.
+\tag{21}
+$$
+
+Здесь $\mathrm{const}_{\beta}$ не зависит от обновляемого блока. Следовательно,
+
+$$
+\boxed{\beta_k^{\mathrm{new}}=\frac{n_k^{(t)}}{A_k}\quad(A_k>0).}
+\tag{22}
+$$
+
+### Обновление ядер
+
+При фиксированных остальных блоках:
+
+$$
+\beta_k\prod_eu_{ike}
+=\sum_s r_k^d[s]\,\beta_kQ_{ids}\prod_{e\ne d}u_{ike},
+\qquad
+B_{kds}=\frac{\beta_k}{N_0}\sum_i
+\frac{Q_{ids}\prod_{e\ne d}u_{ike}}{c_i^{(t)}}.
+\tag{23}
+$$
+
+$$
+G_t(\theta)=\sum_sB_{kds}r_k^d[s]
+-\sum_sm_{kds}^{(t)}\log r_k^d[s]+\mathrm{const}_{r_k^d},
+\qquad
+\boxed{r_k^{d,\mathrm{new}}[s]=\frac{m_{kds}^{(t)}}{B_{kds}}\quad(B_{kds}>0).}
+\tag{24}
+$$
+
+После обновления пересчитываем $u_{ikd}=\sum_sQ_{ids}r_k^{d,\mathrm{new}}[s]$. При нулевом знаменателе применяется (20). Для положительного $Q$ и допустимой текущей точки случай $a=0<b$ не возникает при описанных точных обновлениях. ([примечание 4](#note-zeros))
+
+В логарифмических параметрах при $a,b>0$ формула эквивалентна $\log z^{\mathrm{new}}=\log b-\log a$; нулевому параметру соответствует $-\infty$.
+
+## 4. Итерация и гарантия убывания
+
+На итерации $t$:
+
+1. Вычислить $c^{(t)},\gamma^{(t)},n^{(t)},m^{(t)}$ по (6), (10), (13).
+2. Обновить $\beta$ по (21)–(22).
+3. Для $d=1,\ldots,D$ обновить ядра $r_k^d$ по (23)–(24) и пересчитать $u_{ikd}$. При фиксированном $d$ задачи по различным $k$ независимы.
+4. При необходимости повторить шаги 2–3 с той же мажорантой; принять полученные параметры за $\theta^{(t+1)}$.
+
+Каждый блок минимизируется глобально при фиксированных остальных блоках. Поэтому одного прохода достаточно для
+
+$$
+G_t(\theta^{(t+1)})\le G_t(\theta^{(t)}),
+\qquad
+\boxed{
+\widehat L(\theta^{(t+1)})
+\le G_t(\theta^{(t+1)})
+\le G_t(\theta^{(t)})
+=\widehat L(\theta^{(t)}).
+}
+\tag{25}
+$$
+
+Одновременная подстановка обновлений всех координат $d$ по прежним коэффициентам не обосновывается этой цепочкой. Требуется последовательное обновление блоков.
+
+Мажоранта не обязана быть совместно выпуклой по $(\beta,r)$; (25) не утверждает достижения глобального минимума модели. Для фиксированной выборки значения $\widehat L$ ограничены снизу и потому сходятся; сходимость самих параметров или их глобальная оптимальность из этого не следуют. ([примечание 5](#note-bounded))
+
+Если на каждом шаге используются новые батчи, (25) относится только к эмпирическому loss текущего батча до и после обновления. Она не гарантирует монотонности loss на полной выборке или математического ожидания $L$.
+
+## 5. Неоднозначность масштаба
+
+Отсутствие нормировок не нарушает (3), но делает параметризацию неоднозначной:
+
+$$
+r_k^d\mapsto\alpha r_k^d,\quad\beta_k\mapsto\beta_k/\alpha
+\ \Longrightarrow\ v_\theta\text{ неизменно},\qquad \alpha>0;
+\tag{26}
+$$
+
+$$
+v_\theta\mapsto\alpha v_\theta,\quad c_\theta\mapsto\alpha c_\theta
+\ \Longrightarrow\ q_\theta\text{ и }\widehat L(\theta)\text{ неизменны}.
+\tag{27}
+$$
+
+Таким образом, явные обновления (22), (24) определяют блочный MM без ограничений нормировки; единственность представления параметров не требуется.
+
+## Примечания к выводу
+
+<a id="note-jensen"></a>
+
+### Примечание 1. Неравенство Йенсена
+
+Для $I_j=\{k:\gamma_{jk}^{(t)}>0\}$ имеем $v_j(\theta)\ge\sum_{k\in I_j}h_{jk}(\theta)$ и $\log\sum_{k\in I_j}\gamma_{jk}^{(t)}h_{jk}/\gamma_{jk}^{(t)}\ge\sum_{k\in I_j}\gamma_{jk}^{(t)}\log(h_{jk}/\gamma_{jk}^{(t)})$. Это доказывает (11) также при нулевых $\gamma$. Нулевые коэффициенты в логарифмических суммах дают нулевой вклад; положительный коэффициент при нулевом аргументе даёт $+\infty$ в отрицательной логарифмической части.
+
+<a id="note-grouping"></a>
+
+### Примечание 2. Группировка по категориям
+
+Подставляем $\log h_{jk}=\log\beta_k+\sum_d\log r_k^d[y_j^d]$ для членов с положительным $\gamma_{jk}^{(t)}$. Затем $\sum_j\gamma_{jk}^{(t)}\log r_k^d[y_j^d]=\sum_s(\sum_{j:y_j^d=s}\gamma_{jk}^{(t)})\log r_k^d[s]$. Деление на $N_1$ даёт (13)–(14).
+
+<a id="note-gradient"></a>
+
+### Примечание 3. Совпадение градиентов
+
+Для первого слагаемого $\nabla(c_i/c_i^{(t)})|_{\theta^{(t)}}=\nabla\log c_i|_{\theta^{(t)}}$. Для второго $\nabla\log v_j=\sum_k(h_{jk}/v_j)\nabla\log h_{jk}$ при положительных параметрах, а в точке касания $h_{jk}/v_j=\gamma_{jk}^{(t)}$.
+
+<a id="note-zeros"></a>
+
+### Примечание 4. Нулевые параметры и допустимость обновлений
+
+Если $n_k^{(t)}>0$, то существует $j$ с $h_{jk}^{(t)}>0$: вес и все ядра этой компоненты ненулевые. Из $Q>0$ следует $u_{ikd}>0$ и $A_k>0$. Если $m_{kds}^{(t)}>0$, то $n_k^{(t)}>0$, обновлённый вес положителен и каждое ядро компоненты сохраняет хотя бы одну положительную координату, поскольку $\sum_s m_{kds}^{(t)}=n_k^{(t)}$. Поэтому $B_{kds}>0$. Более того, для каждого $j$ существует компонент с $\gamma_{jk}^{(t)}>0$; его вес и значения ядер на $y_j$ остаются положительными. Следовательно, $v_j>0$ и $c_i>0$ сохраняются на текущей выборке. Для новых наблюдений это утверждение автоматически не переносится.
+
+<a id="note-bounded"></a>
+
+### Примечание 5. Ограниченность целевой функции снизу
+
+На конечном пространстве положим $q_{\min}=\min_{x,y}q^{\mathrm{ref}}(y\mid x)>0$ и $V=\sum_yv_\theta(y)>0$. Тогда $c_i\ge q_{\min}V$, $v_j\le V$, откуда $\widehat L(\theta)\ge\log q_{\min}$. Монотонность (25) и эта нижняя граница обеспечивают сходимость значений целевой функции при фиксированных данных и точных обновлениях.
+
+## Литература
+
+1. Xavier Aramayo Carrasco, Grigoriy Ksenofontov, Aleksei Leonov, Iaroslav Koshelev, Alexander Korotin. *Entering the Era of Discrete Diffusion Models: A Benchmark for Schrödinger Bridges and Entropic Optimal Transport*. ICLR 2026. Предоставленная версия: arXiv:2509.23348v2, 2 марта 2026. §3.2, (8)–(10), с. 5; §4.3, предложение 4.1, (17), с. 7–8. [Основная статья](../Статьи/Основная%20статья.pdf).
+2. Arseny Ivanov, Sergei Kholkin, Vladislav Gromadskii, Grigoriy Ksenofontov, Ivan Oseledets, Alexander Korotin. *TUBE: Tangent Upper Bound on Evidence for Discrete Diffusion Language Models*. Предоставленная версия: arXiv:2605.24292v1, 22 мая 2026. §3.1, определение 3.1, (8)–(9), с. 5. [TUBE](../Статьи/TUBE.pdf).

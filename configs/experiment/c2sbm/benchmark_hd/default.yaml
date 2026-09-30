@@ -1,0 +1,52 @@
+# @package _global_
+
+defaults:
+  - override /data: benchmark_hd
+  - override /model: causal_denoiser_transformer
+  - override /method: c2sbm
+  - override /callbacks:
+    - model_checkpoint
+    - model_summary
+    - progress_bar
+    - benchmark_hd_metrics
+  - override /trainer: gpu
+  - _self_
+
+data:
+  dim: ???
+  input_shape:
+    - ${data.dim}
+  num_categories: 50
+  batch_size: 128
+  val_batch_size: 128
+  num_workers: 0
+  pin_memory: false
+
+prior:
+  implementation: triton
+  alpha: ???
+  prior_type: ???
+  eps: 0
+  num_timesteps: ???
+  num_skip_steps: ???
+
+method:
+  use_mini_batch: false
+  num_first_iterations: 3
+  kl_loss_coeff: ???
+  ce_loss_coeff: 0
+  mse_loss_coeff: ???
+  ignore_index: -100
+  accumulate_grad_batches: 1
+  argmax_mode: false
+
+trainer:
+  max_epochs: 14
+  limit_train_batches: 1.0
+  val_check_interval: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+
+logger:
+  wandb:
+    project: catsbench

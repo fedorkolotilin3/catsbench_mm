@@ -10,16 +10,13 @@ prior: ${prior}
 
 dim: ${data.dim}
 num_categories: ${data.num_categories}
-num_potentials: 10
+num_potentials: 16
 num_timesteps: ${prior.num_timesteps}
 kl_loss_coeff: 1.0
 mse_loss_coeff: 0.0
 use_mini_batch: false
 distr_init: uniform
 entropy_warmup_steps: 20000
-# Deprecated compatibility alias. Prefer the two explicit coefficients below.
 entropy_lambda: 0
-prior_entropy_lambda: 0
-posterior_entropy_lambda: 0
-sample_prob: 0.9
+sample_prob: 0.99
 tau: 1.0

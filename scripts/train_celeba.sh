@@ -12,6 +12,7 @@ sleep $((SLURM_ARRAY_TASK_ID * 5))
 source activate dot_bench
 
 SEED=5
+METHOD=alpha_csbm # (csbm, alpha_csbm, c2sbm)
 EXPERIMENTS=(u0005 u001)
 EXPERIMENT="${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}"
 
@@ -25,4 +26,4 @@ fi
 
 python -m src.run \
   seed=${SEED} data.num_workers=2 data.pin_memory=true \
-  experiment=alpha_csbm/celeba/${EXPERIMENT}
+  experiment=${METHOD}/celeba/${EXPERIMENT}

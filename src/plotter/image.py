@@ -1,3 +1,4 @@
+import os
 from typing import Literal, Optional, Tuple, cast
 
 import matplotlib.pyplot as plt
@@ -6,7 +7,7 @@ import torch
 from torchvision.utils import make_grid
 
 from lightning import Trainer
-from lightning.pytorch.loggers import WandbLogger, CometLogger, TensorBoardLogger
+from lightning.pytorch.loggers import CSVLogger, CometLogger, TensorBoardLogger, WandbLogger
 from lightning.pytorch.utilities import rank_zero_only
 
 from .base import BasePlotterCallback
@@ -17,6 +18,21 @@ from ..utils import fig2img
 
 class ImagePlotterCallback(BasePlotterCallback):
     codec: Optional[BaseCodec] = None
+
+    @staticmethod
+    def _save_csv_image(
+        logger: CSVLogger,
+        img,
+        stage: str,
+        kind: str,
+        fb: str,
+        epoch: int,
+        step: int,
+    ) -> None:
+        image_dir = os.path.join(logger.log_dir, "images")
+        os.makedirs(image_dir, exist_ok=True)
+        filename = f"{stage}_{kind}_{fb}_epoch_{epoch:03d}_step_{step}.png"
+        img.save(os.path.join(image_dir, filename))
 
     def __init__(
         self,
@@ -153,10 +169,15 @@ class ImagePlotterCallback(BasePlotterCallback):
                 global_step=pl_module.global_step,
                 dataformats='HWC',
             )
+        elif isinstance(pl_module.logger, CSVLogger):
+            self._save_csv_image(
+                pl_module.logger, img, stage, 'samples', fb,
+                pl_module.current_epoch, pl_module.global_step,
+            )
         else:
             raise ValueError(
                 f'Unsupported logger type: {type(pl_module.logger)}. Expected '
-                'WandbLogger, TensorBoardLogger or CometLogger.'
+                'WandbLogger, TensorBoardLogger, CometLogger or CSVLogger.'
             )
         plt.close()
 
@@ -249,9 +270,14 @@ class ImagePlotterCallback(BasePlotterCallback):
                 global_step=pl_module.global_step,
                 dataformats='HWC',
             )
+        elif isinstance(pl_module.logger, CSVLogger):
+            self._save_csv_image(
+                pl_module.logger, img, stage, 'trajectories', fb,
+                pl_module.current_epoch, pl_module.global_step,
+            )
         else:
             raise ValueError(
                 f'Unsupported logger type: {type(pl_module.logger)}. Expected '
-                'WandbLogger, TensorBoardLogger or CometLogger.'
+                'WandbLogger, TensorBoardLogger, CometLogger or CSVLogger.'
             )
         plt.close()

@@ -13,6 +13,7 @@ defaults:
   - _self_
 
 prior:
+  implementation: normalized
   alpha: 0.01
   eps: 1e-6
   prior_type: gaussian
@@ -21,7 +22,7 @@ prior:
 
 method:
   dim: 3072
-  num_potentials: 10
+  num_potentials: 1000
   kl_loss_coeff: 1.0
   mse_loss_coeff: 0
   use_mini_batch: true

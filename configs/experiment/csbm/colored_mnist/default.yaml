@@ -13,6 +13,7 @@ defaults:
   - _self_
 
 prior:
+  implementation: normalized
   alpha: 0.01
   eps: 1e-6
   prior_type: gaussian
@@ -25,7 +26,7 @@ method:
   ema:
     decay: 0.9999
   use_mini_batch: true
-  num_first_iterations: 10
+  num_first_iterations: 5
   kl_loss_coeff: 1.0
   ce_loss_coeff: 0.001
   mse_loss_coeff: 0
@@ -34,7 +35,7 @@ method:
   argmax_mode: true
 
 trainer:
-  max_epochs: 58
+  max_epochs: 14
   limit_train_batches: 1.0
   val_check_interval: 1000
   accumulate_grad_batches: 1

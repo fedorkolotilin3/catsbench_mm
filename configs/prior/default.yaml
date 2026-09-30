@@ -6,4 +6,5 @@
   tau: 1
   eps: 1e-20
   prior_type: gaussian # choices: "uniform", "gaussian", "von_mises"
+  implementation: normalized
   dtype: float32

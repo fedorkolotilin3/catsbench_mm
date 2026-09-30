@@ -106,6 +106,7 @@ class BenchmarkBase(nn.Module, BenchmarkModelHubMixin):
             tau=self.tau,
             eps=self.eps,
             prior_type=self.prior_type,
+            implementation="triton",
             dtype=self.params_dtype,
             device=device
         )

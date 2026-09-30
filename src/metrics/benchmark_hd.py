@@ -94,7 +94,7 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
                         ),
                     },
                 )
-            if hasattr(pl_module, 'get_transition_logits'):
+            if callable(getattr(pl_module, 'get_transition_logits', None)):
                 if self.forward_kl_div is None:
                     self.forward_kl_div = TrajectoryKLDivergence(
                         dim=self.dim,
@@ -157,7 +157,7 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
             cond_pred_x_end = pl_module.sample(repeated_x_start)
             self.cond_metrics.update(cond_x_end, cond_pred_x_end)
 
-            if not hasattr(pl_module, 'get_transition_logits'):
+            if not callable(getattr(pl_module, 'get_transition_logits', None)):
                 return
             assert self.forward_kl_div is not None
             assert self.reverse_kl_div is not None
@@ -223,7 +223,7 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
             pl_module.log_dict(cond_metrics)
             self.cond_metrics.reset()
 
-            if not hasattr(pl_module, 'get_transition_logits'):
+            if not callable(getattr(pl_module, 'get_transition_logits', None)):
                 return
             assert self.forward_kl_div is not None
             assert self.reverse_kl_div is not None

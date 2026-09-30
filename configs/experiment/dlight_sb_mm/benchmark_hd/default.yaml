@@ -1,0 +1,60 @@
+# @package _global_
+
+defaults:
+  - override /data: benchmark_hd
+  - override /model: null
+  - override /method: dlight_sb_mm
+  - override /callbacks:
+    - model_checkpoint
+    - model_summary
+    - progress_bar
+    - benchmark_hd_metrics
+  - override /logger: csv
+  - override /trainer: gpu
+  - _self_
+
+data:
+  dim: ???
+  input_shape:
+    - ${data.dim}
+  num_categories: 50
+  batch_size: 10000
+  val_batch_size: 128
+  num_train_batches: 1
+  num_workers: 0
+  pin_memory: false
+
+prior:
+  implementation: triton
+  alpha: ???
+  prior_type: ???
+  eps: 0
+  num_timesteps: 15
+  num_skip_steps: 8
+
+method:
+  num_potentials: 1000
+  distr_init: samples
+
+callbacks:
+  plotter_callback: null
+  model_checkpoint:
+    every_n_epochs: 100
+    save_top_k: 1
+
+logger:
+  csv:
+    version: train
+    flush_logs_every_n_steps: 1
+
+trainer:
+  precision: 32-true
+  max_epochs: 100
+  max_steps: 100
+  limit_train_batches: 1.0
+  val_check_interval: null
+  num_sanity_val_steps: 0
+  limit_val_batches: 0
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  log_every_n_steps: 1

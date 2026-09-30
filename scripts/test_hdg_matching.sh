@@ -12,7 +12,7 @@
 sleep $((SLURM_ARRAY_TASK_ID * 5))
 source activate dot_bench
 SEED=2
-METHOD=csbm # (dlight_sb_m csbm alpha_csbm)
+METHOD=csbm # (dlight_sb_m csbm alpha_csbm c2sbm)
 
 case "${SLURM_ARRAY_TASK_ID}" in
   0)
