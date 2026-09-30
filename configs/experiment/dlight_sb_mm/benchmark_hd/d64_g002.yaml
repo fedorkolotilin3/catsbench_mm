@@ -1,0 +1,11 @@
+# @package _global_
+
+defaults:
+  - dlight_sb_mm/benchmark_hd/default
+
+data:
+  dim: 64
+
+prior:
+  prior_type: gaussian
+  alpha: 0.02
