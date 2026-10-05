@@ -5,6 +5,7 @@ defaults:
 
 data:
   dim: 16
+  batch_size: 32768
 
 prior:
   prior_type: gaussian
