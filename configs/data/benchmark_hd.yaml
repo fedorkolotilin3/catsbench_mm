@@ -4,7 +4,7 @@ input_shape: [16]
 num_categories: 50
 num_timesteps: ${prior.num_timesteps} # optional discretization override; must preserve the total benchmark process
 num_skip_steps: ${prior.num_skip_steps} # checked against the loaded benchmark/effective discretization
-batch_size: 128 # per device; Lightning shards the dataset across devices
+batch_size: 1024 # per device; Lightning shards the dataset across devices
 val_batch_size: 32 # per device
 num_train_batches: 20000
 num_workers: 0

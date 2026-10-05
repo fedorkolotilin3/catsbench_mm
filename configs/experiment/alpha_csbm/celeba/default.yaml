@@ -4,6 +4,7 @@ defaults:
   - override /data: celeba
   - override /model: latent_transformer
   - override /method: alpha_csbm
+  - override /workflow: alpha_imf
   - override /callbacks:
     - model_checkpoint
     - model_summary
@@ -21,13 +22,16 @@ prior:
   num_timesteps: 100
   num_skip_steps: 1
 
+workflow:
+  num_first_iterations: 20
+  cache_dir: ${paths.output_dir}/cache
+
 method:
   optimizer:
     lr: 0.0004
   ema:
     decay: 0.999
   use_mini_batch: false
-  num_first_iterations: 20
   kl_loss_coeff: 1.0
   ce_loss_coeff: 0.001
   mse_loss_coeff: 0

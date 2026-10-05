@@ -10,6 +10,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
+from flash_attn import flash_attn_func, flash_attn_with_kvcache
 from torch.utils.checkpoint import checkpoint
 
 from ..embeddings.dalle_mask_image_embedding import DalleMaskImageEmbedding
@@ -37,8 +38,9 @@ class FullAttention(nn.Module):
         self.proj = nn.Linear(n_embd, n_embd)
         self.n_head = n_head
         self.causal = causal
+        self.use_flash_attention = True
 
-    def forward(self, x, encoder_output, mask=None):
+    def forward(self, x, encoder_output, mask=None, return_attention=True):
         B, T, C = x.size()
         key_value = x
         if encoder_output is not None:
@@ -49,33 +51,98 @@ class FullAttention(nn.Module):
                 )
             key_value = torch.cat((encoder_output, x), dim=1)
         T_KV = key_value.shape[1]
-        k = self.key(key_value).view(B, T_KV, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T_KV, hs)
-        q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = self.value(key_value).view(B, T_KV, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T_KV, hs)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T_KV)
+        head_dim = C // self.n_head
+        k = self.key(key_value).view(B, T_KV, self.n_head, head_dim)
+        q = self.query(x).view(B, T, self.n_head, head_dim)
+        v = self.value(key_value).view(B, T_KV, self.n_head, head_dim)
 
         if mask is not None:
-            mask = mask.to(device=att.device, dtype=torch.bool)
             if mask.dim() == 2:
                 mask = mask[None, None]
             elif mask.dim() == 3:
                 mask = mask[:, None]
-            if mask.shape[-2:] != att.shape[-2:]:
+            if mask.shape[-2:] != (T, T_KV):
                 raise ValueError(
                     f"attention mask shape {tuple(mask.shape[-2:])} must match "
-                    f"attention shape {tuple(att.shape[-2:])}"
+                    f"attention shape {(T, T_KV)}"
                 )
-            att = att.masked_fill(~mask, torch.finfo(att.dtype).min)
 
-        att = F.softmax(att, dim=-1) # (B, nh, T, T_KV)
-        att = self.attn_drop(att)
-        y = att @ v # (B, nh, T, T_KV) x (B, nh, T_KV, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
-        att = att.mean(dim=1, keepdim=False) # (B, T, T_KV)
+        # C2 inference uses x_t as a full KV prefix and x_prev as a causal suffix.
+        if (
+            self.use_flash_attention
+            and x.is_cuda
+            and not self.training
+            and mask is not None
+            and encoder_output is not None
+            and T_KV == 2 * T
+            and not return_attention
+        ):
+            y = flash_attn_func(
+                q.to(torch.bfloat16),
+                k.to(torch.bfloat16),
+                v.to(torch.bfloat16),
+                dropout_p=0.0,
+                causal=True,
+            ).to(q.dtype).reshape(B, T, C)
+            att_weight = None
+        else:
+            k = k.transpose(1, 2)
+            q = q.transpose(1, 2)
+            v = v.transpose(1, 2)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(head_dim))
+            if mask is not None:
+                mask = mask.to(device=att.device, dtype=torch.bool)
+                att = att.masked_fill(~mask, torch.finfo(att.dtype).min)
+            att = F.softmax(att, dim=-1)
+            att = self.attn_drop(att)
+            y = att @ v
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+            att_weight = att.mean(dim=1) if return_attention else None
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y, att
+        return y, att_weight
+
+    def init_cache(self, context, max_tokens):
+        batch_size, context_length, channels = context.shape
+        head_dim = channels // self.n_head
+        cache_dtype = torch.bfloat16
+        key = torch.empty(
+            batch_size,
+            context_length + max_tokens,
+            self.n_head,
+            head_dim,
+            dtype=cache_dtype,
+            device=context.device,
+        )
+        value = torch.empty_like(key)
+        key[:, :context_length] = self.key(context).view(
+            batch_size, context_length, self.n_head, head_dim
+        ).to(cache_dtype)
+        value[:, :context_length] = self.value(context).view(
+            batch_size, context_length, self.n_head, head_dim
+        ).to(cache_dtype)
+        return {"key": key, "value": value, "length": context_length}
+
+    def decode_step(self, x, cache):
+        batch_size, _, channels = x.shape
+        head_dim = channels // self.n_head
+        query = self.query(x).view(batch_size, 1, self.n_head, head_dim)
+        key = self.key(x).view(batch_size, 1, self.n_head, head_dim)
+        value = self.value(x).view(batch_size, 1, self.n_head, head_dim)
+        cache_dtype = cache["key"].dtype
+        output = flash_attn_with_kvcache(
+            query.to(cache_dtype),
+            cache["key"],
+            cache["value"],
+            key.to(cache_dtype),
+            value.to(cache_dtype),
+            cache_seqlens=cache["length"],
+            causal=True,
+        )
+        cache["length"] += 1
+        output = output.to(x.dtype).reshape(batch_size, 1, channels)
+        return self.resid_drop(self.proj(output))
 
 class CrossAttention(nn.Module):
     def __init__(self,
@@ -108,7 +175,7 @@ class CrossAttention(nn.Module):
             self.register_buffer("mask", torch.tril(torch.ones(seq_len, seq_len)) # type: ignore
                                         .view(1, 1, seq_len, seq_len)) # type: ignore
 
-    def forward(self, x, encoder_output, mask=None):
+    def forward(self, x, encoder_output, mask=None, return_attention=True):
         B, T, C = x.size()
         B, T_E, _ = encoder_output.size()
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -122,11 +189,11 @@ class CrossAttention(nn.Module):
         att = self.attn_drop(att)
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
-        att = att.mean(dim=1, keepdim=False) # (B, T, T)
+        att_weight = att.mean(dim=1, keepdim=False) if return_attention else None
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y, att
+        return y, att_weight
 
 class GELU2(nn.Module):
     def __init__(self):
@@ -163,13 +230,23 @@ class AdaLayerNorm(nn.Module):
         self.layernorm = nn.LayerNorm(n_embd, elementwise_affine=False)
         self.diff_step = diffusion_step
 
-    def forward(self, x, timestep):
-        if timestep[0] >= self.diff_step:
-            _emb = self.emb.weight.mean(dim=0, keepdim=True).repeat(len(timestep), 1)
-            emb = self.linear(self.silu(_emb)).unsqueeze(1)
+    def get_scale_shift(self, timestep):
+        if isinstance(self.emb, nn.Embedding):
+            # Keep the original fallback for special timesteps while avoiding
+            # a Python conditional on a CUDA scalar (and its device sync).
+            in_range = timestep < self.diff_step
+            embedded_timestep = self.emb(timestep.clamp(max=self.diff_step - 1))
+            fallback = self.emb.weight.mean(dim=0, keepdim=True)
+            embedded_timestep = torch.where(
+                in_range[:, None], embedded_timestep, fallback
+            )
         else:
-            emb = self.linear(self.silu(self.emb(timestep))).unsqueeze(1)
-        scale, shift = torch.chunk(emb, 2, dim=2)
+            embedded_timestep = self.emb(timestep)
+        emb = self.linear(self.silu(embedded_timestep)).unsqueeze(1)
+        return torch.chunk(emb, 2, dim=2)
+
+    def forward(self, x, timestep):
+        scale, shift = self.get_scale_shift(timestep)
         x = self.layernorm(x) * (1 + scale) + shift
         return x
 
@@ -277,14 +354,31 @@ class Block(nn.Module):
                 nn.Dropout(resid_pdrop),
             )
 
-    def forward(self, x, encoder_output, timestep, mask=None):    
+    def forward(
+        self, x, encoder_output, timestep, mask=None, return_attention=True
+    ):
         if self.attn_type == "selfcross":
-            a, att = self.attn1(self.ln1(x, timestep), None, mask=mask)
+            a, att = self.attn1(
+                self.ln1(x, timestep),
+                None,
+                mask=mask,
+                return_attention=return_attention,
+            )
             x = x + a
-            a, att = self.attn2(self.ln1_1(x, timestep), encoder_output, mask=mask)
+            a, att = self.attn2(
+                self.ln1_1(x, timestep),
+                encoder_output,
+                mask=mask,
+                return_attention=return_attention,
+            )
             x = x + a
         elif self.attn_type == "selfcondition":
-            a, att = self.attn(self.ln1(x, timestep), None, mask=mask)
+            a, att = self.attn(
+                self.ln1(x, timestep),
+                None,
+                mask=mask,
+                return_attention=return_attention,
+            )
             x = x + a
             mlp_input = self.ln2(x, encoder_output.long())
             if isinstance(self.mlp, Conv_MLP):
@@ -293,7 +387,12 @@ class Block(nn.Module):
                 x = x + self.mlp(mlp_input)
             return x, att
         else:  # 'self'
-            a, att = self.attn(self.ln1(x, timestep), encoder_output, mask=mask)
+            a, att = self.attn(
+                self.ln1(x, timestep),
+                encoder_output,
+                mask=mask,
+                return_attention=return_attention,
+            )
             x = x + a 
 
         mlp_input = self.ln2(x)
@@ -337,6 +436,48 @@ class Conv_MLP(nn.Module):
             x = self.conv2(self.act(self.conv1(x)))
         x = rearrange(x, 'b c h w -> b (h w) c')
         return self.dropout(x)
+
+    def init_cache(self, reference, seq_len, neighbor_indices):
+        batch_size = reference.shape[0]
+        hidden_channels = self.conv1.out_channels
+        positions = ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1))
+        conv1_weight = torch.cat(
+            [self.conv1.weight[:, :, row, col] for row, col in positions],
+            dim=1,
+        )
+        conv2_weight = torch.cat(
+            [self.conv2.weight[:, :, row, col] for row, col in positions],
+            dim=1,
+        )
+        cache = {
+            "inputs": reference.new_empty(
+                batch_size, seq_len + 1, self.conv1.in_channels
+            ),
+            "hidden": reference.new_empty(
+                batch_size, seq_len + 1, hidden_channels
+            ),
+            "conv1_weight": conv1_weight,
+            "conv2_weight": conv2_weight,
+            "neighbor_indices": neighbor_indices,
+        }
+        cache["inputs"][:, seq_len].zero_()
+        cache["hidden"][:, seq_len].zero_()
+        return cache
+
+    def decode_step(self, x, index, cache):
+        cache["inputs"][:, index] = x[:, 0]
+        indices = cache["neighbor_indices"][index]
+        input_patch = cache["inputs"].index_select(1, indices).flatten(1)
+        hidden = self.act(
+            F.linear(input_patch, cache["conv1_weight"], self.conv1.bias)
+        )
+        cache["hidden"][:, index] = hidden
+
+        hidden_patch = cache["hidden"].index_select(1, indices).flatten(1)
+        output = F.linear(
+            hidden_patch, cache["conv2_weight"], self.conv2.bias
+        )
+        return self.dropout(output).unsqueeze(1)
 
 class Text2ImageTransformer(nn.Module):
     def __init__(
@@ -763,7 +904,13 @@ class UnCondition2ImageTransformer(nn.Module):
                 )
 
         for block_idx in range(len(self.blocks)):
-            emb, _ = self.blocks[block_idx](emb, context, t, mask=mask) # B x L x D, B x L x (L_context + L)
+            emb, _ = self.blocks[block_idx](
+                emb,
+                context,
+                t,
+                mask=mask,
+                return_attention=False,
+            ) # B x L x D
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         # out = rearrange(logits, 'b l c -> b c l')
         return logits

@@ -1,5 +1,3 @@
-from typing import List
-
 import os
 from omegaconf import DictConfig, OmegaConf
 import hydra
@@ -13,16 +11,12 @@ try:
 except ImportError:
     pass
 import lightning as L
-from lightning import Callback, LightningDataModule, Trainer
-from lightning.pytorch.loggers import Logger
+from lightning import LightningDataModule
 
 from .utils.ranked_logger import RankedLogger
 from .methods import BaseMethod
-from .utils import (
-    get_run_directory_from_checkpoint, 
-    instantiate_callbacks, 
-    instantiate_loggers
-)
+from .methods.workflows import BaseWorkflow
+from .utils import get_run_directory_from_checkpoint
 
 
 if torch.cuda.is_available():
@@ -57,21 +51,7 @@ def main(config: DictConfig):
     datamodule: LightningDataModule = instantiate(config.data)
     
     log.info(f'Instantiating method <{config.method._target_}>...')
-    #print(config)
     method: BaseMethod = instantiate(config.method)
-
-    log.info('Instantiating callbacks...')
-    callbacks: List[Callback] = instantiate_callbacks(config.get('callbacks'))
-
-    log.info('Instantiating loggers...')
-    loggers: List[Logger] = instantiate_loggers(
-        config.get('logger'), config.paths.output_dir
-    )
-    for logger in loggers:
-        logger.log_hyperparams(OmegaConf.to_container(config))
-
-    log.info(f'Instantiating trainer <{config.trainer._target_}>...')
-    trainer: Trainer = instantiate(config.trainer, callbacks=callbacks, logger=loggers)
 
     ckpt_path = config.get('ckpt_path')
     if ckpt_path == 'auto':
@@ -82,13 +62,28 @@ def main(config: DictConfig):
                 'Pass ckpt_path=/path/to/checkpoint.ckpt explicitly.'
             )
     
+    log.info(f'Instantiating workflow <{config.workflow._target_}>...')
+    workflow: BaseWorkflow = instantiate(config.workflow)
+    hparams = OmegaConf.to_container(config)
+
     if config.task_name == 'train':
         log.info('Starting training!')
-        trainer.fit(model=method, datamodule=datamodule, ckpt_path=ckpt_path)
+        workflow.train(
+            method=method,
+            datamodule=datamodule,
+            ckpt_path=ckpt_path,
+            hparams=hparams,
+        )
+
     elif config.task_name == 'test':
         assert ckpt_path is not None, 'The `ckpt_path` must be provided for testing!'
         log.info(f'Starting testing with ckpt_path: {ckpt_path}.')
-        trainer.test(model=method, datamodule=datamodule, ckpt_path=ckpt_path)
+        workflow.test(
+            method=method,
+            datamodule=datamodule,
+            ckpt_path=ckpt_path,
+            hparams=hparams,
+        )
     else:
         raise ValueError(f'Unknown task name: {config.task_name}!')
 

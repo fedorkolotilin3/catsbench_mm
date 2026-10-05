@@ -92,20 +92,21 @@ class C2SBM(CSBM):
         samples = torch.full_like(x_t, model.mask_token_id)
         samples_flat = samples.reshape(batch_size, event_size)
 
-        transition_logits = []
+        transition_logits = [] if return_transitions else None
         for index in range(event_size):
             logits = model(x_t, t, x_prev=samples.clone())
             logits = logits.reshape(batch_size, event_size, -1)[:, index]
-            transition_logits.append(logits)
+            if transition_logits is not None:
+                transition_logits.append(logits.clone())
 
             token = gumbel_sample(logits, tau=self.hparams.tau, dim=-1)
             if self.hparams.argmax_mode:
                 token = torch.where(t == 1, logits.argmax(dim=-1), token)
             samples_flat[:, index] = token
 
-        transition_logits = torch.stack(transition_logits, dim=1).reshape(
-            batch_size, *event_shape, transition_logits[0].shape[-1]
-        )
-        if return_transitions:
+        if transition_logits is not None:
+            transition_logits = torch.stack(transition_logits, dim=1).reshape(
+                batch_size, *event_shape, transition_logits[0].shape[-1]
+            )
             return samples, transition_logits
         return samples

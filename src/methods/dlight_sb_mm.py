@@ -25,18 +25,21 @@ import torch
 from .dlight_sb import DLightSB
 
 
-def _nonnegative_minimum_from_logs(
+def _support_preserving_update_from_logs(
     log_a: torch.Tensor,
     log_b: torch.Tensor,
     current_log_z: torch.Tensor,
 ) -> torch.Tensor:
-    """Minimize ``a*z - b*log(z)`` coordinatewise over ``z >= 0``.
+    """Apply a support-preserving MM update to ``a*z - b*log(z)``.
 
     The explicit solution is ``z = b / a`` when both coefficients are
-    positive. Inputs and the result stay in the log domain. If ``a > 0`` and
-    ``b = 0``, the minimizer is exactly zero. If ``a = b = 0``, the objective
-    is constant in that coordinate and its current value is preserved. The
-    remaining case, ``a = 0 < b``, has no finite minimizer.
+    positive. Inputs and the result stay in the log domain. If ``b = 0``, the
+    current value is preserved instead of taking the boundary minimizer zero.
+    This leaves that coordinate's surrogate contribution unchanged and keeps
+    support for categories that may occur in later stochastic batches. If all
+    ``b`` coefficients in a block are zero, the complete block is therefore
+    left unchanged. The remaining case, ``a = 0 < b``, has no finite
+    minimizer.
     """
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
         raise ValueError("log_a, log_b and current_log_z must have the same shape")
@@ -54,9 +57,8 @@ def _nonnegative_minimum_from_logs(
     log_z = current_log_z.clone()
     interior = positive_a & positive_b
     log_z = torch.where(interior, log_b - log_a, log_z)
-    log_z = torch.where(positive_a & ~positive_b, -torch.inf, log_z)
     if torch.isnan(log_z).any() or torch.isposinf(log_z).any():
-        raise FloatingPointError("Non-finite explicit MM block update")
+        raise FloatingPointError("Non-finite support-preserving MM block update")
     return log_z
 
 
@@ -123,7 +125,8 @@ class DLightSBMM(DLightSB):
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
     statistics. Parameters are constrained only to be nonnegative; each block
-    therefore has the explicit coordinatewise minimizer ``z = b / a``.
+    uses the explicit minimizer ``z = b / a`` for positive sufficient
+    statistics and preserves coordinates with zero stochastic-batch counts.
     """
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
@@ -325,7 +328,7 @@ class DLightSBMM(DLightSB):
             log_a = torch.logsumexp(
                 log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
             )
-            log_beta = _nonnegative_minimum_from_logs(log_a, log_n, log_beta)
+            log_beta = _support_preserving_update_from_logs(log_a, log_n, log_beta)
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -342,7 +345,7 @@ class DLightSBMM(DLightSB):
                 log_b_linear = _stable_log_matmul(
                     log_q[d].T, log_coefficients
                 )  # [S,K]
-                log_r[d] = _nonnegative_minimum_from_logs(
+                log_r[d] = _support_preserving_update_from_logs(
                     log_b_linear.T, log_m[d].T, log_r[d].T
                 ).T
                 log_u[d] = _stable_log_matmul(log_q[d], log_r[d])

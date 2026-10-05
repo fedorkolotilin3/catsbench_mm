@@ -4,6 +4,7 @@ defaults:
 - alpha_csbm/benchmark_hd/default
 data:
   dim: 64
+  num_train_batches: 80000
 prior:
   prior_type: uniform
   alpha: 0.01

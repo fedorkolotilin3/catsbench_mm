@@ -5,7 +5,7 @@ import torch
 from src.data.prior import Prior
 from src.methods.dlight_sb_mm import (
     DLightSBMM,
-    _nonnegative_minimum_from_logs,
+    _support_preserving_update_from_logs,
 )
 
 
@@ -15,23 +15,32 @@ class NonnegativeBlockMinimumTest(unittest.TestCase):
         log_b = torch.tensor([torch.log(torch.tensor(8.0)), -torch.inf, -torch.inf])
         current = torch.log(torch.tensor([1.0, 7.0, 5.0], dtype=torch.float64))
 
-        result = _nonnegative_minimum_from_logs(log_a, log_b, current)
+        result = _support_preserving_update_from_logs(log_a, log_b, current)
 
         self.assertAlmostEqual(result[0].exp().item(), 4.0)
-        self.assertTrue(torch.isneginf(result[1]))
-        self.assertTrue(torch.isneginf(result[2]))
+        self.assertAlmostEqual(result[1].exp().item(), 7.0)
+        self.assertAlmostEqual(result[2].exp().item(), 5.0)
 
     def test_zero_over_zero_preserves_current_value(self):
-        result = _nonnegative_minimum_from_logs(
+        result = _support_preserving_update_from_logs(
             torch.tensor([-torch.inf], dtype=torch.float64),
             torch.tensor([-torch.inf], dtype=torch.float64),
             torch.log(torch.tensor([7.0], dtype=torch.float64)),
         )
         self.assertAlmostEqual(result.exp().item(), 7.0)
 
+    def test_all_zero_coefficients_preserve_complete_block(self):
+        log_a = torch.full((3,), -torch.inf, dtype=torch.float64)
+        log_b = torch.full((3,), -torch.inf, dtype=torch.float64)
+        current = torch.log(torch.tensor([2.0, 3.0, 5.0], dtype=torch.float64))
+
+        result = _support_preserving_update_from_logs(log_a, log_b, current)
+
+        self.assertTrue(torch.equal(result, current))
+
     def test_positive_b_with_zero_a_is_unbounded(self):
         with self.assertRaisesRegex(FloatingPointError, "unbounded"):
-            _nonnegative_minimum_from_logs(
+            _support_preserving_update_from_logs(
                 torch.tensor([-torch.inf], dtype=torch.float64),
                 torch.tensor([0.0], dtype=torch.float64),
                 torch.tensor([0.0], dtype=torch.float64),
@@ -94,15 +103,37 @@ class DLightSBMMUpdateTest(unittest.TestCase):
         self.assertFalse(torch.isposinf(model.log_alpha).any())
         self.assertGreater(torch.logsumexp(model.log_alpha, dim=0).item(), 1.0)
 
-    def test_unobserved_target_category_gets_exact_zero(self):
+    def test_unobserved_target_category_preserves_support(self):
         torch.manual_seed(0)
         model = self._make_model()
+        previous = model.log_cp_cores[:, 2].detach().clone()
         x0 = torch.tensor([[0, 0], [1, 1], [2, 2]], dtype=torch.long)
         x1 = torch.tensor([[0, 0], [1, 1], [0, 1], [1, 0]], dtype=torch.long)
 
         model.mm_step(x0, x1)
 
-        self.assertTrue(torch.isneginf(model.log_cp_cores[:, 2]).all())
+        self.assertTrue(torch.equal(model.log_cp_cores[:, 2], previous))
+        self.assertTrue(torch.isfinite(model.log_cp_cores).all())
+
+    def test_category_missing_then_observed_keeps_objective_finite(self):
+        torch.manual_seed(0)
+        model = self._make_model()
+
+        first_x0 = torch.tensor(
+            [[0, 0], [1, 1], [0, 1], [1, 0]], dtype=torch.long
+        )
+        first_x1 = first_x0.clone()
+        model.mm_step(first_x0, first_x1)
+
+        second_x0 = torch.tensor(
+            [[2, 2], [0, 0], [1, 1]], dtype=torch.long
+        )
+        second_x1 = second_x0.clone()
+        info = model.mm_step(second_x0, second_x1)
+
+        self.assertTrue(torch.isfinite(torch.tensor(info["loss_before"])))
+        self.assertTrue(torch.isfinite(torch.tensor(info["loss"])))
+        self.assertTrue(torch.isfinite(model.log_cp_cores).all())
 
 
 if __name__ == "__main__":

@@ -4,10 +4,10 @@ model_checkpoint:
   filename: epoch_{epoch:03d}
   every_n_epochs: 1
   save_on_train_epoch_end: true
-  monitor: null 
+  monitor: epoch
   verbose: false
   save_last: True
-  save_top_k: -1
-  mode: min
+  save_top_k: 2
+  mode: max
   auto_insert_metric_name: false
   save_weights_only: false

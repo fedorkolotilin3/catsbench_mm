@@ -171,6 +171,8 @@ class ImageDataModule(LightningDataModule):
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
+        self.initial_coupling: Optional[CoupleDataset] = None
+        self.predict_dataset: Optional[Dataset] = None
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data by setting `self.data_train`, `self.data_val`, and `self.data_test`."""
@@ -184,20 +186,47 @@ class ImageDataModule(LightningDataModule):
                 coupled_train,
                 length=self.hparams.num_train_batches * self.hparams.batch_size,
             )
+            self.initial_coupling = coupled_train
             self.data_val = CoupleDataset(
                 input_dataset=self.hparams.input_dataset(train=False),
                 target_dataset=self.hparams.target_dataset(train=False),
             )
 
     def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
-        mode = self.hparams.train_data_mode if self.trainer.training else self.hparams.eval_data_mode
-        if mode == "encoded":
-            return Batch(encoded=tuple(batch), raw=(None, None))
+        """Used for caching logic in predict mode."""
+        if self.trainer.predicting:
+            # for Alpha-CSBM predict uses two inputs simultaneously
+            if isinstance(batch, (list, tuple)):
+                x, y = batch
+                if self.hparams.train_data_mode == "raw":
+                    self.codec.to(x.device)
+                    x = self.codec.encode_to_cats(x)
+                    y = self.codec.encode_to_cats(y)
+                return Batch(encoded=(x, y))
+
+            # under contract with method.predict and workflow
+            # one element batch (CSBM case) always uses first position
+            if self.hparams.train_data_mode == "raw":
+                self.codec.to(batch.device)
+                batch = self.codec.encode_to_cats(batch)
+            return Batch(encoded=(batch, None))
+
+        if self.trainer.training:
+            data_mode = self.hparams.train_data_mode
+        else:
+            data_mode = self.hparams.eval_data_mode
+        cached = self.trainer.training and getattr(
+            self.data_train, "cached", False
+        )
+
+        if data_mode == "encoded":
+            return Batch(encoded=tuple(batch), cached=cached)
         x, y = batch
         self.codec.to(x.device)
         return Batch(
             encoded=(self.codec.encode_to_cats(x), self.codec.encode_to_cats(y)),
             raw=(x, y),
+            cached=cached,
         )
     
     def train_dataloader(self) -> DataLoader[Any]:
@@ -208,6 +237,15 @@ class ImageDataModule(LightningDataModule):
                 self.hparams.persistent_workers and self.hparams.num_workers > 0
             ),
             drop_last=True,
+        )
+
+    def predict_dataloader(self) -> DataLoader[Any]:
+        return DataLoader(
+            self.predict_dataset, batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers, pin_memory=self.hparams.pin_memory,
+            persistent_workers=(
+                self.hparams.persistent_workers and self.hparams.num_workers > 0
+            ),
         )
 
     def val_dataloader(self) -> DataLoader[Any]:

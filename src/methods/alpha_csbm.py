@@ -1,27 +1,19 @@
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional
 
-import torch
 from torch import nn
-from torch.nn import functional as F
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
-from torch_ema import ExponentialMovingAverage 
-from .base import BaseMethod
+from torch_ema import ExponentialMovingAverage
 
+from .csbm import CSBM
+from .workflows.imf import IMFPhase
 from ..data.batch import Batch
 from ..data.prior import Prior
-from ..utils import optimize_coupling, gumbel_sample
-
-
-HPARAMS = (
-    'num_timesteps', 'kl_loss_coeff', 'ce_loss_coeff', 'mse_loss_coeff', 
-    'use_mini_batch', 'ignore_index', 'num_first_iterations',
-    'optimizer', 'scheduler', 'argmax_mode', 'tau'
-)
+from ..utils import optimize_coupling
 
 # NOTE: start and end is swapped because alpha-CSBM uses 
 # reverse diffusion notation
-class AlphaCSBM(BaseMethod):
+class AlphaCSBM(CSBM):
     def __init__(
         self,
         num_timesteps: int,
@@ -30,7 +22,6 @@ class AlphaCSBM(BaseMethod):
         model_backward: nn.Module,
         ema: ExponentialMovingAverage, # partially initialized
         optimizer: Optimizer, # partially initialized 
-        num_first_iterations: int,
         scheduler: Optional[LRScheduler] = None, # partially initialized 
         kl_loss_coeff: float = 1.0,
         ce_loss_coeff: float = 0.001,
@@ -40,131 +31,90 @@ class AlphaCSBM(BaseMethod):
         argmax_mode: bool = True,
         tau: float = 1.0,
     ) -> None:
-        super().__init__()
-        # somehow this function is able to load all 
-        # the method arguments and put to `self.hparams`
-        # save only `HPARAMS` for memory efficiency (probably :))
-        self.save_hyperparameters(*HPARAMS, logger=False)
-        self.bidirectional = False
-        self.iteration = 1
-        self.prior = prior
-        
-        # models explicitly stated to be able log parameters
-        self.model_forward = model_forward
-        self.model_backward = model_backward
-        self.models = {
-            'forward': self.model_forward,
-            'backward': self.model_backward,
-        }
-        self.emas: Dict[str, ExponentialMovingAverage] = {
-            'forward': ema(self.models['forward'].parameters()),
-            'backward': ema(self.models['backward'].parameters())
-        }
-
-    def kl_loss(
-        self,
-        true_logits: torch.Tensor, 
-        pred_logits: torch.Tensor,
-    ) -> torch.Tensor:
-        '''KL-divergence calculation.'''
-        pred_log_probs = torch.log_softmax(pred_logits, dim=-1)
-        true_log_probs = torch.log_softmax(true_logits, dim=-1)
-        kl_loss = F.kl_div(pred_log_probs, true_log_probs, log_target=True, reduction='none')
-        kl_loss = kl_loss.sum(dim=-1).mean()
-        return kl_loss
-        
-    def mse_loss(
-        self,
-        true_logits: torch.Tensor, 
-        pred_logits: torch.Tensor,
-    ) -> torch.Tensor:        
-        '''MSE calculation.'''
-        pred_probs = torch.softmax(pred_logits, dim=-1)
-        true_probs = torch.softmax(true_logits, dim=-1)
-        mse_loss = F.mse_loss(pred_probs, true_probs, reduction='sum')
-        return mse_loss / true_probs.shape[0]
-
-    def ce_loss(
-        self,
-        true_x_start: torch.Tensor, 
-        pred_x_start_logits: torch.Tensor, 
-    ) -> torch.Tensor:   
-        '''CE calculation.'''         
-        pred_x_start_logits = pred_x_start_logits.flatten(start_dim=0, end_dim=-2)
-        true_x_start = true_x_start.flatten(start_dim=0, end_dim=-1)
-        ce_loss = F.cross_entropy(pred_x_start_logits, true_x_start, ignore_index=self.hparams.ignore_index)
-        return ce_loss
-
-    # EMA does not inherit nn.Module so it must be 
-    # putted to device manually 
-    def setup(self, stage: Literal['fit', 'validate', 'test']) -> None:
-        self.emas['forward'].to(self.device)
-        self.emas['backward'].to(self.device)
-    
-    def markovian_projection(
-        self,
-        fb: Literal['forward', 'backward'],
-        true_x_start: torch.Tensor,
-        true_x_end: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:  
-        batch_size = true_x_start.shape[0]
-        t = torch.randint(
-            low=1, high=self.hparams.num_timesteps + 2,
-            size=(batch_size,), device=self.device
+        super().__init__(
+            num_timesteps=num_timesteps,
+            prior=prior,
+            model_forward=model_forward,
+            model_backward=model_backward,
+            ema=ema,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            kl_loss_coeff=kl_loss_coeff,
+            ce_loss_coeff=ce_loss_coeff,
+            mse_loss_coeff=mse_loss_coeff,
+            use_mini_batch=use_mini_batch,
+            ignore_index=ignore_index,
+            accumulate_grad_batches=1,
+            argmax_mode=argmax_mode,
+            tau=tau,
         )
-        x_t = self.prior.sample_bridge(true_x_start, true_x_end, t)
+        self.bidirectional = False
+        self.training_phase = IMFPhase(direction='both', iteration=1)
+        self.automatic_optimization = True
 
-        pred_x_start_logits = self.models[fb](x_t, t)
-        true_q_posterior_logits = self.prior.posterior_logits(true_x_start, x_t, t, logits=False)
-        pred_p_transition_logits = self.prior.posterior_logits(pred_x_start_logits, x_t, t, logits=True)
+    @property
+    def fb(self) -> Literal['forward']:
+        return 'forward'
 
-        loss, kl, ce, mse = 0, 0, 0, 0
-        if self.hparams.kl_loss_coeff > 0:
-            kl = self.kl_loss(true_q_posterior_logits, pred_p_transition_logits)
-            loss += self.hparams.kl_loss_coeff * kl
-        if self.hparams.ce_loss_coeff > 0:
-            ce = self.ce_loss(true_x_start, pred_x_start_logits)
-            loss += self.hparams.ce_loss_coeff * ce
-        if self.hparams.mse_loss_coeff > 0:
-            mse = self.mse_loss(true_q_posterior_logits, pred_p_transition_logits)
-            loss += self.hparams.mse_loss_coeff * mse
-        
-        info = {f'kl_loss_{fb}': kl, f'ce_loss_{fb}': ce, f'mse_loss_{fb}': mse}
-        return loss, info
+    @property
+    def bf(self) -> Literal['backward']:
+        return 'backward'
 
     def training_step(
         self, batch: Batch, batch_idx: int
     ) -> Dict[str, Any]:
-        b = batch[0].shape[0] // 2
-        x_end, x_start = batch
-        raw_x_end, raw_x_start = batch.raw
-        output_batch = Batch(
-            encoded=(x_end, x_start),
-            raw=(raw_x_end, raw_x_start),
-        )
+        # alpha-CSBM effectively uses only half of the batch size,
+        # so we split the batch for cached batch it is already split in workflow
+        if batch.cached:
+            forward_batch, backward_batch = batch
+            pred_x_end, x_start = forward_batch
+            x_end, pred_x_start = backward_batch
 
-        # if first iteration apply optional mini-batch sampling
-        if self.iteration == 1 and self.hparams.use_mini_batch:
-            x_start, x_end = optimize_coupling(x_start, x_end)
+            loss_forward, info_forward = self.markovian_projection(
+                'forward', x_start, pred_x_end
+            )
+            loss_backward, info_backward = self.markovian_projection(
+                'backward', x_end, pred_x_start
+            )
+            output_batch = Batch(
+                encoded=(pred_x_end, x_start),
+            )
+        else:
+            b = batch[0].shape[0] // 2
+            x_end, x_start = batch
+            raw_x_end, raw_x_start = batch.raw
             output_batch = Batch(
                 encoded=(x_end, x_start),
-                raw=(None, None),
+                raw=(raw_x_end, raw_x_start),
             )
 
-        if self.iteration == 1:
-            loss_forward, info_forward = self.markovian_projection('forward', x_start[:b], x_end[:b])
-            loss_backward, info_backward = self.markovian_projection('backward', x_end[b:], x_start[b:])
-        else:
-            pred_x_end = self.sample(x_start[:b], fb='backward')
-            pred_x_start = self.sample(x_end[:b], fb='forward')
-            loss_forward, info_forward = self.markovian_projection('forward', x_start[:b], pred_x_end)
-            loss_backward, info_backward = self.markovian_projection('backward', x_end[:b], pred_x_start)
-            output_batch = Batch(
-                encoded=(pred_x_end, x_start[:b]),
-                raw=(None, None if raw_x_start is None else raw_x_start[:b]),
-            )
+            if self.iteration == 1 and self.hparams.use_mini_batch:
+                x_start, x_end = optimize_coupling(x_start, x_end)
+                output_batch = Batch(encoded=(x_end, x_start))
+
+            if self.iteration == 1:
+                loss_forward, info_forward = self.markovian_projection(
+                    'forward', x_start[:b], x_end[:b]
+                )
+                loss_backward, info_backward = self.markovian_projection(
+                    'backward', x_end[b:], x_start[b:]
+                )
+            else:
+                pred_x_end = self.sample(x_start[:b], fb='backward')
+                pred_x_start = self.sample(x_end[:b], fb='forward')
+                loss_forward, info_forward = self.markovian_projection(
+                    'forward', x_start[:b], pred_x_end
+                )
+                loss_backward, info_backward = self.markovian_projection(
+                    'backward', x_end[:b], pred_x_start
+                )
+                output_batch = Batch(
+                    encoded=(pred_x_end, x_start[:b]),
+                    raw=(None, None if raw_x_start is None else raw_x_start[:b]),
+                )
+
         loss = (loss_forward + loss_backward) / 2
-        
+
         # logs step-wise loss, `add_dataloader_idx=False` is used to have custom fb prefix
         info = {f"train/{k}": v for k, v in {**info_forward, **info_backward}.items()}
         self.log_dict(info, prog_bar=True, sync_dist=True) 
@@ -177,10 +127,6 @@ class AlphaCSBM(BaseMethod):
         self.emas['forward'].update()
         self.emas['backward'].update()
 
-    def on_train_epoch_end(self) -> None:
-        if self.current_epoch + 1 >= self.hparams.num_first_iterations:
-            self.iteration += 1
-
     def validation_step(
         self, batch: Batch, batch_idx: int
     ) -> Dict[str, Any]:
@@ -191,10 +137,7 @@ class AlphaCSBM(BaseMethod):
         # if first iteration apply optional mini-batch sampling
         if self.iteration == 1 and self.hparams.use_mini_batch:
             x_start, x_end = optimize_coupling(x_start, x_end)
-            output_batch = Batch(
-                encoded=(x_end, x_start),
-                raw=(None, None),
-            )
+            output_batch = Batch(encoded=(x_end, x_start))
 
         if self.iteration == 1:
             loss_forward, info_forward = self.markovian_projection('forward', x_start[:b], x_end[:b])
@@ -223,10 +166,7 @@ class AlphaCSBM(BaseMethod):
         # if first iteration apply optional mini-batch sampling
         if self.iteration == 1 and self.hparams.use_mini_batch:
             x_start, x_end = optimize_coupling(x_start, x_end)
-            output_batch = Batch(
-                encoded=(x_end, x_start),
-                raw=(None, None),
-            )
+            output_batch = Batch(encoded=(x_end, x_start))
 
         if self.iteration == 1:
             loss_forward, info_forward = self.markovian_projection('forward', x_start[:b], x_end[:b])
@@ -256,111 +196,3 @@ class AlphaCSBM(BaseMethod):
             scheduler = self.hparams.scheduler(optimizer=optimizer)
             return {'optimizer': optimizer, 'lr_scheduler': scheduler}
         return {'optimizer': optimizer}
-
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        checkpoint['ema_forward'] = self.emas['forward'].state_dict()
-        checkpoint['ema_backward'] = self.emas['backward'].state_dict()
-        checkpoint['iteration'] = self.iteration
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        if 'ema_forward' in checkpoint:
-            self.emas['forward'].load_state_dict(checkpoint['ema_forward'])
-            self.emas['forward'].to(self.device)
-        if 'ema_backward' in checkpoint:
-            self.emas['backward'].load_state_dict(checkpoint['ema_backward'])
-            self.emas['backward'].to(self.device)
-        if 'iteration' in checkpoint:
-            self.iteration = checkpoint['iteration']
-
-    @torch.no_grad()
-    def get_transition_logits(
-        self, 
-        x_t: torch.Tensor, 
-        t: torch.Tensor, 
-        fb: Optional[Literal['forward', 'backward']] = None
-    ) -> torch.Tensor:
-        fb = fb or 'forward'
-        was_training = self.models[fb].training
-        self.models[fb].eval()
-
-        with self.emas[fb].average_parameters():
-            pred_x_start_logits = self.models[fb](x_t, t)
-
-        if was_training: 
-            self.models[fb].train()
-
-        pred_transition_logits = self.prior.posterior_logits(pred_x_start_logits, x_t, t, logits=True)
-        return pred_transition_logits
-
-    @torch.no_grad()
-    def markov_sample(
-        self, 
-        x_t: torch.Tensor, 
-        t: torch.Tensor, 
-        fb: Literal['forward', 'backward'], 
-        return_transitions: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # we don't use here get_transition_logits avoid multiple EMA calls
-        pred_x_start_logits = self.models[fb](x_t, t)
-        pred_transition_logits = self.prior.posterior_logits(pred_x_start_logits, x_t, t, logits=True)
-        samples = gumbel_sample(
-            pred_transition_logits, tau=self.hparams.tau, dim=-1
-        )
-
-        if self.hparams.argmax_mode:
-            first_step = (t == 1).view((x_t.shape[0], *[1] * (x_t.dim() - 1)))        
-            argmax_samples = pred_transition_logits.argmax(dim=-1)
-            samples = torch.where(first_step, argmax_samples, samples)
-
-        if return_transitions:
-            return samples, pred_transition_logits
-        return samples
-        
-    @torch.no_grad()
-    def sample(
-        self, x: torch.Tensor, fb: Optional[Literal['forward', 'backward']] = None
-    ) -> torch.Tensor:
-        """Sample from the model starting from `x` returning the final sample."""
-        fb = fb or 'forward'
-
-        was_training = self.models[fb].training
-        self.models[fb].eval()
-        with self.emas[fb].average_parameters():
-            for t in reversed(range(1, self.hparams.num_timesteps + 2)):
-                t = torch.full([x.shape[0]], t, device=self.device)
-                x = self.markov_sample(x, t, fb, return_transitions=False)
-        if was_training: 
-            self.models[fb].train()
-        return x
-    
-    @torch.no_grad()
-    def sample_trajectory(
-        self, x: torch.Tensor, 
-        fb: Optional[Literal['forward', 'backward']] = None,
-        return_transitions: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Sample from the model starting from `x` returning the full trajectory."""
-        fb = fb or 'forward'
-
-        trajectory, transitions = [x], []
-        
-        was_training = self.models[fb].training
-        self.models[fb].eval()
-        with self.emas[fb].average_parameters():
-            for t in reversed(range(1, self.hparams.num_timesteps + 2)):
-                t = torch.full([x.shape[0]], t, device=self.device)
-                out = self.markov_sample(x, t, fb, return_transitions=return_transitions)
-                if return_transitions:
-                    x, logits = out
-                    transitions.append(logits)
-                else:
-                    x = out
-                trajectory.append(x)
-        if was_training: 
-            self.models[fb].train()
-        
-        trajectory = torch.stack(trajectory, dim=0)
-        if return_transitions:
-            transitions = torch.stack(transitions, dim=0)
-            return trajectory, transitions
-        return trajectory

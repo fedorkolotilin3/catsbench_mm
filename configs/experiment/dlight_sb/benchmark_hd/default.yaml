@@ -17,7 +17,7 @@ data:
   input_shape: 
     - ${data.dim}
   num_categories: 50
-  batch_size: 128 
+  batch_size: 1024
   val_batch_size: 128
   num_workers: 0
   pin_memory: false
@@ -31,13 +31,14 @@ prior:
   num_skip_steps: 8
 
 method:
-  num_potentials: 1000
+  num_potentials: 16
   distr_init: samples
 
 trainer:
   max_epochs: 5
   limit_train_batches: 1.0
-  val_check_interval: null
+  val_check_interval: 10000
+  num_sanity_val_steps: 0
   accumulate_grad_batches: 1
   gradient_clip_val: null
 

@@ -1,0 +1,6 @@
+_target_: src.methods.workflows.FitWorkflow
+_recursive_: false
+
+trainer_config: ${trainer}
+callbacks_config: ${callbacks}
+logger_config: ${logger}

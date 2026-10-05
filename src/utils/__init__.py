@@ -10,6 +10,7 @@ from .data import (
     convert_to_torch, 
     continuous_to_discrete,
     CoupleDataset,
+    NumpyDataset,
     RepeatedDataset,
     SampledCoupleDataset,
     optimize_coupling

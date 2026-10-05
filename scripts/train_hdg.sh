@@ -29,5 +29,5 @@ for GROUP_ID in "${!DIMS[@]}"; do
     seed=${SEED} data.num_workers=0 data.pin_memory=false \
     'hydra.launcher.submitit_folder=${paths.log_dir}/.submitit/'${RUN_ID} \
     'hydra.sweep.subdir=${hydra:runtime.choices.experiment}/${seed}/${now:%Y-%m-%d}_${now:%H-%M-%S}'_${RUN_ID} \
-    experiment=${EXPERIMENTS}
+    experiment=${EXPERIMENTS} logger=csv
 done

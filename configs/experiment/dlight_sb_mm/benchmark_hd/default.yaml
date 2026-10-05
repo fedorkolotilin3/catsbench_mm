@@ -18,7 +18,7 @@ data:
   input_shape:
     - ${data.dim}
   num_categories: 50
-  batch_size: 10000
+  batch_size: 8192
   val_batch_size: 128
   num_train_batches: 1
   num_workers: 0
@@ -33,28 +33,22 @@ prior:
   num_skip_steps: 8
 
 method:
-  num_potentials: 1000
+  num_potentials: 16
   distr_init: samples
-
-callbacks:
-  plotter_callback: null
-  model_checkpoint:
-    every_n_epochs: 100
-    save_top_k: 1
 
 logger:
   csv:
-    version: train
     flush_logs_every_n_steps: 1
 
 trainer:
   precision: 32-true
   max_epochs: 100
   max_steps: 100
+  log_every_n_steps: 1
   limit_train_batches: 1.0
   val_check_interval: null
+  check_val_every_n_epoch: 10
   num_sanity_val_steps: 0
-  limit_val_batches: 0
+  limit_val_batches: 1.0
   accumulate_grad_batches: 1
   gradient_clip_val: null
-  log_every_n_steps: 1

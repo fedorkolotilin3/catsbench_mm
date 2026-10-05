@@ -2,5 +2,9 @@ _target_: src.methods.models.mlp.DenoiserMLP
 input_dim: ${data.dim}
 num_categories: ${data.num_categories}
 num_timesteps: ${prior.num_timesteps}
-timestep_dim: 2
-layers: [128, 128, 128]
+timestep_dim: 16
+timestep_embedding_scale: 64.0
+timestep_embedding_max_period: 100.0
+num_layers: 3
+min_hidden_dim: 128
+hidden_units_per_dimension: 8

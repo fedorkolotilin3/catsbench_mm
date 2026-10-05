@@ -92,6 +92,8 @@ class ToyDataModule(LightningDataModule):
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
+        self.initial_coupling: Optional[CoupleDataset] = None
+        self.predict_dataset: Optional[Dataset] = None
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data by seting variables: `self.data_train`, `self.data_val`, `self.data_test`."""
@@ -108,6 +110,7 @@ class ToyDataModule(LightningDataModule):
                 coupled_train,
                 length=self.hparams.num_train_batches * self.hparams.batch_size,
             )
+            self.initial_coupling = coupled_train
 
             ####################### VALIDATION DATASET ######################
             size_val = int(self.hparams.num_samples * self.hparams.train_test_split[1])
@@ -117,7 +120,18 @@ class ToyDataModule(LightningDataModule):
             )
 
     def on_after_batch_transfer(self, batch: Any, dataloader_idx: int) -> Any:
-        return Batch(encoded=tuple(batch), raw=tuple(batch))
+        """Used for caching logic in predict mode."""
+        # under contract with method.predict and workflow
+        # one element batch (CSBM case) always uses first position
+        # for Alpha-CSBM predict uses two inputs simultaneously
+        if self.trainer.predicting:
+            if isinstance(batch, (list, tuple)):
+                return Batch(encoded=tuple(batch))
+            return Batch(encoded=(batch, None))
+        cached = self.trainer.training and getattr(
+            self.data_train, "cached", False
+        )
+        return Batch(encoded=tuple(batch), raw=tuple(batch), cached=cached)
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Create and return the train dataloader."""
@@ -128,6 +142,14 @@ class ToyDataModule(LightningDataModule):
             pin_memory=self.hparams.pin_memory,
             shuffle=True,
             drop_last=True,
+        )
+
+    def predict_dataloader(self) -> DataLoader[Any]:
+        return DataLoader(
+            dataset=self.predict_dataset,
+            batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers,
+            pin_memory=self.hparams.pin_memory,
         )
 
     def val_dataloader(self) -> DataLoader[Any]:

@@ -4,6 +4,7 @@ defaults:
   - override /data: colored_mnist
   - override /model: denoiser_image
   - override /method: csbm
+  - override /workflow: imf
   - override /callbacks:
     - model_checkpoint
     - model_summary
@@ -20,13 +21,15 @@ prior:
   num_timesteps: ???
   num_skip_steps: ???
 
+workflow:
+  num_first_iterations: 5
+
 method:
   optimizer:
     lr: 0.0002
   ema:
     decay: 0.9999
   use_mini_batch: true
-  num_first_iterations: 5
   kl_loss_coeff: 1.0
   ce_loss_coeff: 0.001
   mse_loss_coeff: 0

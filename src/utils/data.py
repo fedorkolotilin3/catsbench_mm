@@ -47,10 +47,16 @@ def continuous_to_discrete(
 
 class CoupleDataset(Dataset):
     """A dataset that couples two datasets together, allowing for paired sampling."""
-    def __init__(self, input_dataset: torch.Tensor, target_dataset: torch.Tensor):
+    def __init__(
+        self,
+        input_dataset: torch.Tensor,
+        target_dataset: torch.Tensor,
+        cached: bool = False,
+    ):
         self.input_dataset, self.target_dataset = input_dataset, target_dataset
         self.len_input, self.len_target = len(input_dataset), len(target_dataset)
         self.length = max(self.len_input, self.len_target)
+        self.cached = cached
 
     def __len__(self):
         return self.length
@@ -58,6 +64,19 @@ class CoupleDataset(Dataset):
     def __getitem__(self, idx):
         return (self.input_dataset[idx % self.len_input],
                 self.target_dataset[idx % self.len_target])
+
+
+class NumpyDataset(Dataset):
+    """Load one tensor from an NPY file for each item."""
+
+    def __init__(self, paths):
+        self.paths = paths
+
+    def __getitem__(self, index):
+        return torch.from_numpy(np.load(self.paths[index])).long()
+
+    def __len__(self):
+        return len(self.paths)
 
 class RepeatedDataset(Dataset):
     """Expose a finite virtual epoch by repeating a smaller dataset."""
@@ -70,6 +89,10 @@ class RepeatedDataset(Dataset):
 
     def __len__(self) -> int:
         return self.length
+
+    @property
+    def cached(self) -> bool:
+        return getattr(self.dataset, "cached", False)
 
 class SampledCoupleDataset(Dataset):
     """Expose freshly sampled marginals through a finite map-style dataset."""

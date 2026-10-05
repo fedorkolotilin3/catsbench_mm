@@ -10,8 +10,8 @@
 source activate dot_bench
 set -e
 
-SEED=5
-METHOD=alpha_csbm # (dlight_sb_m csbm alpha_csbm c2sbm)
+SEED=${SEED:-5}
+METHOD=${METHOD:-alpha_csbm} # (dlight_sb_m csbm alpha_csbm c2sbm)
 DIMS=(2 16 64)
 BENCHMARKS=(g002 g005 u0005 u001)
 VARIANTS=(t63_kl t63_mse t15_kl t15_mse)
@@ -31,7 +31,7 @@ for DIM in "${DIMS[@]}"; do
       seed=${SEED} data.num_workers=0 data.pin_memory=false \
       'hydra.launcher.submitit_folder=${paths.log_dir}/.submitit/'${RUN_ID} \
       'hydra.sweep.subdir=${hydra:runtime.choices.experiment}/${seed}/${now:%Y-%m-%d}_${now:%H-%M-%S}'_${RUN_ID} \
-      experiment=${EXPERIMENTS}
+      experiment=${EXPERIMENTS} logger=csv
 
     GROUP_ID=$((GROUP_ID + 1))
   done

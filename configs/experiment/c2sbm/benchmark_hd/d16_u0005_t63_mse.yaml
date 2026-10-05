@@ -6,6 +6,7 @@ defaults:
 
 data:
   dim: 16
+  num_train_batches: 80000
 
 prior:
   prior_type: uniform

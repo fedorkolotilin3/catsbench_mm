@@ -4,6 +4,7 @@ defaults:
   - override /data: celeba
   - override /model: latent_transformer
   - override /method: c2sbm
+  - override /workflow: imf
   - override /callbacks:
     - model_checkpoint
     - model_summary
@@ -16,12 +17,16 @@ defaults:
 prior:
   implementation: normalized
   alpha: ???
-  # These values are calculated to match
+  # these vaules are calculated to match
   # num_timesteps=100 and num_skip_steps=1
   eps: 5.180131997141631e-05
   prior_type: uniform
   num_timesteps: 1
   num_skip_steps: 50.5
+
+workflow:
+  num_first_iterations: 20
+  cache_dir: ${paths.output_dir}/cache
 
 method:
   optimizer:
@@ -29,13 +34,12 @@ method:
   ema:
     decay: 0.999
   use_mini_batch: false
-  num_first_iterations: 20
   kl_loss_coeff: 1.0
   ce_loss_coeff: 0.001
   mse_loss_coeff: 0
   ignore_index: -100
   accumulate_grad_batches: 1
-  argmax_mode: true
+  argmax_mode: false
 
 trainer:
   devices: 4

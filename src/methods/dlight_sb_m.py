@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import math
 import torch
 from torch import nn
-from torch.nn import functional as F
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 
@@ -19,7 +18,7 @@ from ..utils.ranked_logger import RankedLogger
 HPARAMS = (
     'dim', 'num_categories', 'num_potentials', 'num_timesteps',
     'sample_prob', 'use_mini_batch', 'distr_init', 'tau',
-    'entropy_lambda', 'entropy_warmup_steps', 'kl_loss_coeff', 'mse_loss_coeff', 
+    'entropy_lambda', 'entropy_warmup_steps', 'kl_loss_coeff', 'mse_loss_coeff',
     'optimizer', 'scheduler'
 )
 log = RankedLogger(__name__, rank_zero_only=True)
@@ -154,24 +153,86 @@ class DLightSB_M(BaseMethod):
 
     def kl_loss(
         self,
-        true_logits: torch.Tensor, 
-        pred_logits: torch.Tensor,
+        true_logits: torch.Tensor,
+        pred_marginal_logits: torch.Tensor,
+        x_t: torch.Tensor,
+        x_tp1: torch.Tensor,
+        t: torch.Tensor,
     ) -> torch.Tensor:
-        '''KL-divergence calculation.'''
-        pred_log_probs = torch.log_softmax(pred_logits, dim=-1)
-        true_log_probs = torch.log_softmax(true_logits, dim=-1)
-        return F.kl_div(pred_log_probs, true_log_probs, log_target=True, reduction='batchmean')
+        """Joint KL-divergence calculation."""
+        true_log_probs = true_logits.log_softmax(dim=-1)
+        pred_marginal_log_probs = pred_marginal_logits.log_softmax(dim=-1)
+        true_probs = true_log_probs.exp()
+
+        marginal_kl = (
+            true_probs * (true_log_probs - pred_marginal_log_probs)
+        ).sum(dim=-1).flatten(start_dim=1).sum(dim=-1)
+        sampled_marginal_log_prob = torch.gather(
+            pred_marginal_log_probs, dim=-1, index=x_tp1.unsqueeze(-1)
+        ).squeeze(-1).flatten(start_dim=1).sum(dim=-1)
+
+        x_t = x_t.flatten(start_dim=1)
+        x_tp1 = x_tp1.flatten(start_dim=1)
+        time_to_end = self.hparams.num_timesteps + 1 - t
+        log_u_t = self._log_u_t(x_t, time_to_end)
+        log_u_tp1 = self._log_u_t(x_tp1, time_to_end - 1)
+        log_reference = self.prior.extract(
+            "onestep", t + 1, row_id=x_t, column_id=x_tp1
+        ).sum(dim=1)
+        log_potential_tp1 = torch.logsumexp(
+            self.log_alpha[None, :] + log_u_tp1.sum(dim=1), dim=-1
+        )
+        log_normalizer_t = torch.logsumexp(
+            self.log_alpha[None, :] + log_u_t.sum(dim=1), dim=-1
+        )
+        sampled_joint_log_prob = (
+            log_reference + log_potential_tp1 - log_normalizer_t
+        )
+
+        return (
+            marginal_kl
+            + sampled_marginal_log_prob
+            - sampled_joint_log_prob
+        ).mean()
         
     def mse_loss(
         self,
-        true_logits: torch.Tensor, 
-        pred_logits: torch.Tensor,
-    ) -> torch.Tensor:        
-        '''MSE calculation.'''
-        pred_probs = torch.softmax(pred_logits, dim=-1)
-        true_probs = torch.softmax(true_logits, dim=-1)
-        mse_loss = F.mse_loss(pred_probs, true_probs, reduction='sum')
-        return mse_loss / true_probs.shape[0]
+        true_logits: torch.Tensor,
+        x_t: torch.Tensor,
+        x_tp1: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """Joint MSE calculation."""
+        true_log_probs = true_logits.log_softmax(dim=-1)
+        sampled_true_log_prob = torch.gather(
+            true_log_probs, dim=-1, index=x_tp1.unsqueeze(-1)
+        ).squeeze(-1).flatten(start_dim=1).sum(dim=-1)
+        x_t = x_t.flatten(start_dim=1)
+        x_tp1 = x_tp1.flatten(start_dim=1)
+
+        time_to_end = self.hparams.num_timesteps + 1 - t
+        log_u_t = self._log_u_t(x_t, time_to_end)
+        log_u_tp1 = self._log_u_t(x_tp1, time_to_end - 1)
+        log_reference = self.prior.extract(
+            "onestep", t + 1, row_id=x_t, column_id=x_tp1
+        ).sum(dim=1)
+        log_potential_tp1 = torch.logsumexp(
+            self.log_alpha[None, :] + log_u_tp1.sum(dim=1), dim=-1
+        )
+        log_normalizer_t = torch.logsumexp(
+            self.log_alpha[None, :] + log_u_t.sum(dim=1), dim=-1
+        )
+        sampled_model_log_prob = (
+            log_reference + log_potential_tp1 - log_normalizer_t
+        )
+
+        true_joint_prob = sampled_true_log_prob.exp()
+        model_joint_prob = sampled_model_log_prob.exp()
+        loss = (
+            (true_joint_prob - model_joint_prob).square()
+            / true_joint_prob.clamp_min(torch.finfo(true_joint_prob.dtype).tiny)
+        )
+        return loss.mean()
     
     def entropy_loss(self, logits: torch.Tensor, dim: int = -1) -> torch.Tensor:
         log_probs = torch.log_softmax(logits, dim=dim)
@@ -275,27 +336,41 @@ class DLightSB_M(BaseMethod):
         x_t = self.prior.sample_bridge(true_x_start, true_x_end, t)
 
         true_q_posterior_logits = self.prior.posterior_logits_reverse(true_x_end, x_t, t, logits=False)
-        pred_p_transition_logits = self.get_transition_logits(x_t, t=t)
 
-        loss, kl, mse  = 0, 0, 0
-        posterior_eff_k, prior_eff_k = 0, 0
+        loss = true_q_posterior_logits.new_zeros(())
+        kl = true_q_posterior_logits.new_zeros(())
+        mse = true_q_posterior_logits.new_zeros(())
+        if self.hparams.kl_loss_coeff > 0 or self.hparams.mse_loss_coeff > 0:
+            x_tp1 = gumbel_sample(true_q_posterior_logits, tau=1.0, dim=-1)
         if self.hparams.kl_loss_coeff > 0:
-            kl = self.kl_loss(true_q_posterior_logits, pred_p_transition_logits)
+            pred_p_transition_logits = self.get_transition_logits(x_t, t=t)
+            kl = self.kl_loss(
+                true_q_posterior_logits,
+                pred_p_transition_logits,
+                x_t, x_tp1, t
+            )
             loss = loss + self.hparams.kl_loss_coeff * kl
         if self.hparams.mse_loss_coeff > 0:
-            mse = self.mse_loss(true_q_posterior_logits, pred_p_transition_logits)
+            mse = self.mse_loss(
+                true_q_posterior_logits,
+                x_t, x_tp1, t,
+            )
             loss = loss + self.hparams.mse_loss_coeff * mse
-        if self._ent_lambda() > 0:
+
+        ent_lambda = self._ent_lambda()
+        track_entropy_grad = torch.is_grad_enabled() and ent_lambda > 0
+        with torch.set_grad_enabled(track_entropy_grad):
             log_z_t = self._log_u_t(
                 x_t.flatten(start_dim=1), 
                 self.hparams.num_timesteps + 1 - t
             ).sum(dim=1)
             ent = self.entropy_loss(self.log_alpha[None, :] + log_z_t, dim=-1)
-            loss = loss - self._ent_lambda() * ent.mean()
 
-            with torch.no_grad():
-                posterior_eff_k = ent.exp().mean()
-                prior_eff_k = self.entropy_loss(self.log_alpha, dim=0).exp()
+        if ent_lambda > 0:
+            loss = loss - ent_lambda * ent.mean()
+
+        posterior_eff_k = ent.detach().exp().mean()
+        prior_eff_k = self.entropy_loss(self.log_alpha.detach(), dim=0).exp()
 
         info = {
             'kl_loss': kl, 'mse_loss': mse, 
@@ -312,10 +387,7 @@ class DLightSB_M(BaseMethod):
         # if first iteration apply optional mini-batch sampling
         if self.hparams.use_mini_batch:
             x_start, x_end = optimize_coupling(x_start, x_end)
-            output_batch = Batch(
-                encoded=(x_start, x_end),
-                raw=(None, None),
-            )
+            output_batch = Batch(encoded=(x_start, x_end))
         else:
             output_batch = batch
         loss, info = self.optimal_projection(x_start, x_end)

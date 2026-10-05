@@ -5,9 +5,10 @@ import torch
 
 
 @dataclass
-class Batch(Sequence[torch.Tensor]):
-    encoded: tuple[torch.Tensor, torch.Tensor]
-    raw: tuple[torch.Tensor | None, torch.Tensor | None]
+class Batch(Sequence[torch.Tensor | None]):
+    encoded: tuple[torch.Tensor | None, torch.Tensor | None]
+    raw: tuple[torch.Tensor | None, torch.Tensor | None] = (None, None)
+    cached: bool = False
 
     def __getitem__(self, index):
         return self.encoded[index]
@@ -15,5 +16,5 @@ class Batch(Sequence[torch.Tensor]):
     def __len__(self) -> int:
         return len(self.encoded)
 
-    def __iter__(self) -> Iterator[torch.Tensor]:
+    def __iter__(self) -> Iterator[torch.Tensor | None]:
         return iter(self.encoded)

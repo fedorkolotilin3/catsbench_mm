@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -8,6 +9,7 @@ from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch_ema import ExponentialMovingAverage 
 
 from .base import BaseMethod
+from .workflows.imf import IMFPhase
 from ..data.batch import Batch
 from ..data.prior import Prior
 from ..utils import optimize_coupling, gumbel_sample
@@ -15,7 +17,7 @@ from ..utils import optimize_coupling, gumbel_sample
 
 HPARAMS = (
     'num_timesteps', 'kl_loss_coeff', 'ce_loss_coeff', 'mse_loss_coeff', 
-    'use_mini_batch', 'ignore_index', 'num_first_iterations', 'accumulate_grad_batches',
+    'use_mini_batch', 'ignore_index', 'accumulate_grad_batches',
     'optimizer', 'scheduler', 'argmax_mode', 'tau'
 )
 
@@ -30,7 +32,6 @@ class CSBM(BaseMethod):
         model_backward: nn.Module,
         ema: ExponentialMovingAverage, # partially initialized
         optimizer: Optimizer, # partially initialized 
-        num_first_iterations: int,
         scheduler: Optional[LRScheduler] = None, # partially initialized 
         kl_loss_coeff: float = 1.0,
         ce_loss_coeff: float = 0.001,
@@ -47,7 +48,7 @@ class CSBM(BaseMethod):
         # save only `HPARAMS` for memory efficiency (probably :))
         self.save_hyperparameters(*HPARAMS, logger=False)
         self.bidirectional = True
-        self.iteration = 1
+        self.training_phase = IMFPhase(direction='forward', iteration=1)
         self.prior = prior
         
         # models explicitly stated to be able log parameters
@@ -61,16 +62,22 @@ class CSBM(BaseMethod):
             'forward': ema(self.models['forward'].parameters()),
             'backward': ema(self.models['backward'].parameters())
         }
+        self._ema_active_directions = set()
+        self._ema_training_modes = {}
     
         self.automatic_optimization = False
 
     @property
     def fb(self) -> Literal['forward', 'backward']:
-        return 'forward' if self.current_epoch % 2 == 0 else 'backward'
+        return self.training_phase.direction
 
     @property
     def bf(self) -> Literal['forward', 'backward']:
-        return 'backward' if self.fb == 'forward' else 'forward'
+        return self.training_phase.opposite_direction
+
+    @property
+    def iteration(self) -> int:
+        return self.training_phase.iteration
 
     def kl_loss(
         self,
@@ -157,12 +164,12 @@ class CSBM(BaseMethod):
             x_start, x_end = batch
             raw_x_start, raw_x_end = batch.raw
 
-        if self.iteration > 1:
+        output_raw = (None, None)
+        if self.iteration > 1 and not batch.cached:
             x_end = self.sample(x_start, fb=self.bf)
             output_raw = (None, raw_x_start)
         elif self.hparams.use_mini_batch:
             x_start, x_end = optimize_coupling(x_start, x_end)
-            output_raw = (None, None)
         else:
             output_raw = (raw_x_end, raw_x_start)
         output_batch = Batch(encoded=(x_end, x_start), raw=output_raw)
@@ -199,10 +206,16 @@ class CSBM(BaseMethod):
                 self.emas[self.fb].update()
         return {'loss': step_loss, 'batch': output_batch}
 
-    def on_train_epoch_end(self) -> None:
-        # increment iteration count after a full cycle (forward + backward)
-        if (self.current_epoch + 1) // 2 >= self.hparams.num_first_iterations and self.fb == 'backward':
-            self.iteration += 1
+    def on_validation_start(self) -> None:
+        for direction in self.models:
+            if direction in self._ema_active_directions:
+                continue
+            model = self.models[direction]
+            self._ema_training_modes[direction] = model.training
+            self.emas[direction].store()
+            self.emas[direction].copy_to()
+            self._ema_active_directions.add(direction)
+            model.eval()
 
     def validation_step(
         self, batch: Batch, batch_idx: int
@@ -230,7 +243,28 @@ class CSBM(BaseMethod):
         self.log_dict(info, prog_bar=True, sync_dist=True) 
         self.log('val/iteration', self.iteration, prog_bar=True)
         return {'loss': loss, 'batch': output_batch}
-    
+
+    def on_validation_end(self) -> None:
+        for direction in self.models:
+            if direction not in self._ema_active_directions:
+                continue
+            self.emas[direction].restore()
+            self._ema_active_directions.remove(direction)
+            self.models[direction].train(
+                self._ema_training_modes.pop(direction)
+            )
+
+    def on_test_start(self) -> None:
+        for direction in self.models:
+            if direction in self._ema_active_directions:
+                continue
+            model = self.models[direction]
+            self._ema_training_modes[direction] = model.training
+            self.emas[direction].store()
+            self.emas[direction].copy_to()
+            self._ema_active_directions.add(direction)
+            model.eval()
+
     def test_step(
         self, batch: Batch, batch_idx: int
     ) -> Dict[str, Any]:
@@ -258,6 +292,69 @@ class CSBM(BaseMethod):
         self.log('test/iteration', self.iteration, prog_bar=True)
         return {'loss': loss, 'batch': output_batch}
 
+    def on_test_end(self) -> None:
+        for direction in self.models:
+            if direction not in self._ema_active_directions:
+                continue
+            self.emas[direction].restore()
+            self._ema_active_directions.remove(direction)
+            self.models[direction].train(
+                self._ema_training_modes.pop(direction)
+            )
+
+    def on_predict_start(self) -> None:
+        sampling_direction = self.training_phase.opposite_direction
+        directions = self.models if sampling_direction == 'both' else (sampling_direction,)
+        for direction in directions:
+            if direction in self._ema_active_directions:
+                continue
+            model = self.models[direction]
+            self._ema_training_modes[direction] = model.training
+            self.emas[direction].store()
+            self.emas[direction].copy_to()
+            self._ema_active_directions.add(direction)
+            model.eval()
+
+    def predict_step(
+        self,
+        batch: Batch,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ):
+        sampling_direction = self.training_phase.opposite_direction
+        if sampling_direction == 'both':
+            x_end, x_start = batch
+            return (
+                self.sample(x_start, fb='backward'),
+                self.sample(x_end, fb='forward'),
+            )
+
+        # input is always in the batch[0]
+        # contract with datamodule classes
+        if batch[0] is None:
+            raise ValueError("Predict batch does not contain an input tensor.")
+        return self.sample(batch[0], fb=sampling_direction)
+
+    def on_predict_end(self) -> None:
+        for direction in self.models:
+            if direction not in self._ema_active_directions:
+                continue
+            self.emas[direction].restore()
+            self._ema_active_directions.remove(direction)
+            self.models[direction].train(
+                self._ema_training_modes.pop(direction)
+            )
+
+    def teardown(self, stage: str) -> None:
+        for direction in self.models:
+            if direction not in self._ema_active_directions:
+                continue
+            self.emas[direction].restore()
+            self._ema_active_directions.remove(direction)
+            self.models[direction].train(
+                self._ema_training_modes.pop(direction)
+            )
+
     def configure_optimizers(self) -> List[Dict[str, Any]]:
         optimizer_forward  = self.hparams.optimizer(params=self.models['forward'].parameters())
         optimizer_backward  = self.hparams.optimizer(params=self.models['backward'].parameters())
@@ -274,7 +371,6 @@ class CSBM(BaseMethod):
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         checkpoint['ema_forward'] = self.emas['forward'].state_dict()
         checkpoint['ema_backward'] = self.emas['backward'].state_dict()
-        checkpoint['iteration'] = self.iteration
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         if 'ema_forward' in checkpoint:
@@ -283,8 +379,6 @@ class CSBM(BaseMethod):
         if 'ema_backward' in checkpoint:
             self.emas['backward'].load_state_dict(checkpoint['ema_backward'])
             self.emas['backward'].to(self.device)
-        if 'iteration' in checkpoint:
-            self.iteration = checkpoint['iteration']
 
     @torch.no_grad()
     def get_transition_logits(
@@ -297,7 +391,14 @@ class CSBM(BaseMethod):
         was_training = self.models[fb].training
         self.models[fb].eval()
 
-        with self.emas[fb].average_parameters():
+        # if ema_is_active don't override params each batch
+        ema_is_active = fb in self._ema_active_directions
+        ema_context = (
+            nullcontext()
+            if ema_is_active
+            else self.emas[fb].average_parameters()
+        )
+        with ema_context:
             pred_x_start_logits = self.models[fb](x_t, t)
 
         if was_training: 
@@ -338,7 +439,15 @@ class CSBM(BaseMethod):
 
         was_training = self.models[fb].training
         self.models[fb].eval()
-        with self.emas[fb].average_parameters():
+
+        # if ema_is_active don't override params each batch
+        ema_is_active = fb in self._ema_active_directions
+        ema_context = (
+            nullcontext()
+            if ema_is_active
+            else self.emas[fb].average_parameters()
+        )
+        with ema_context:
             for t in reversed(range(1, self.hparams.num_timesteps + 2)):
                 t = torch.full([x.shape[0]], t, device=self.device)
                 x = self.markov_sample(x, t, fb, return_transitions=False)
@@ -359,7 +468,15 @@ class CSBM(BaseMethod):
         
         was_training = self.models[fb].training
         self.models[fb].eval()
-        with self.emas[fb].average_parameters():
+
+        # if ema_is_active don't override params each batch
+        ema_is_active = fb in self._ema_active_directions
+        ema_context = (
+            nullcontext()
+            if ema_is_active
+            else self.emas[fb].average_parameters()
+        )
+        with ema_context:
             for t in reversed(range(1, self.hparams.num_timesteps + 2)):
                 t = torch.full([x.shape[0]], t, device=self.device)
                 out = self.markov_sample(x, t, fb, return_transitions=return_transitions)

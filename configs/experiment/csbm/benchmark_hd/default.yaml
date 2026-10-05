@@ -4,6 +4,7 @@ defaults:
   - override /data: benchmark_hd
   - override /model: denoiser_mlp
   - override /method: csbm
+  - override /workflow: imf
   - override /callbacks:
     - model_checkpoint
     - model_summary
@@ -17,14 +18,10 @@ data:
   input_shape: 
     - ${data.dim}
   num_categories: 50
-  batch_size: 128 
+  batch_size: 1024
   val_batch_size: 128
   num_workers: 0
   pin_memory: false
-
-model:
- timestep_dim: ${data.dim}
- layers: [128, 128, 128]
 
 prior:
   implementation: triton
@@ -34,9 +31,11 @@ prior:
   num_timesteps: ???
   num_skip_steps: ???
 
+workflow:
+  num_first_iterations: 3
+
 method:
   use_mini_batch: false
-  num_first_iterations: 3
   kl_loss_coeff: ???
   ce_loss_coeff: 0
   mse_loss_coeff: ???

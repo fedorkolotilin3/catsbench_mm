@@ -3,6 +3,7 @@ defaults:
   - prior: default
   - model: denoiser_mlp 
   - method: csbm
+  - workflow: fit
   - callbacks: 
     - model_summary
     - progress_bar
@@ -22,6 +23,4 @@ paths:
 
 task_name: train
 seed: 42
-# A Lightning checkpoint path for resuming training or testing. When this is a
-# local <run>/checkpoints/*.ckpt file, Hydra reuses <run> as its output dir.
 ckpt_path: null
