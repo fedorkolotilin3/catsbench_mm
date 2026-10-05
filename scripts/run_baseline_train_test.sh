@@ -4,7 +4,6 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 EXPERIMENT="${BASELINE_EXPERIMENT:-dlight_sb/benchmark_hd/d2_g002}"
-HYDRA_OVERRIDES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -13,13 +12,8 @@ while [[ $# -gt 0 ]]; do
       EXPERIMENT="$2"
       shift 2
       ;;
-    --)
-      shift
-      HYDRA_OVERRIDES=("$@")
-      break
-      ;;
     -h|--help)
-      echo "Usage: $0 [--experiment HYDRA_EXPERIMENT] [-- HYDRA_OVERRIDE ...]"
+      echo "Usage: $0 [--experiment HYDRA_EXPERIMENT]"
       exit 0
       ;;
     *)
@@ -37,8 +31,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   logger=csv \
   logger.csv.version=train \
-  '++callbacks.plotter_callback=null' \
-  "${HYDRA_OVERRIDES[@]}"
+  '++callbacks.plotter_callback=null'
 
 echo "[baseline] testing last checkpoint"
 bash "${SCRIPT_DIR}/run_colab.sh" \
@@ -47,7 +40,6 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   logger=csv \
   logger.csv.version=test \
-  '++callbacks.plotter_callback=null' \
-  "${HYDRA_OVERRIDES[@]}"
+  '++callbacks.plotter_callback=null'
 
 echo "[baseline] train and test completed"

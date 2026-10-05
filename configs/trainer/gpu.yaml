@@ -8,3 +8,4 @@ val_check_interval: 1000
 accelerator: gpu
 devices: 1
 deterministic: false
+enable_progress_bar: true

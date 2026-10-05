@@ -6,7 +6,6 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MM_THREADS="${MM_NUM_THREADS:-$(nproc)}"
 MM_DEVICE="${MM_DEVICE:-cpu}"
 EXPERIMENT="${MM_EXPERIMENT:-dlight_sb_mm/benchmark_hd/d2_g002}"
-HYDRA_OVERRIDES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,13 +19,8 @@ while [[ $# -gt 0 ]]; do
       EXPERIMENT="$2"
       shift 2
       ;;
-    --)
-      shift
-      HYDRA_OVERRIDES=("$@")
-      break
-      ;;
     -h|--help)
-      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT] [-- HYDRA_OVERRIDE ...]"
+      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT]"
       exit 0
       ;;
     *)
@@ -57,8 +51,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
   logger.csv.version=train \
-  '++callbacks.plotter_callback=null' \
-  "${HYDRA_OVERRIDES[@]}"
+  '++callbacks.plotter_callback=null'
 
 echo "[mm] testing last checkpoint"
 bash "${SCRIPT_DIR}/run_colab.sh" \
@@ -68,7 +61,6 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
   logger.csv.version=test \
-  '++callbacks.plotter_callback=null' \
-  "${HYDRA_OVERRIDES[@]}"
+  '++callbacks.plotter_callback=null'
 
 echo "[mm] train and test completed"
