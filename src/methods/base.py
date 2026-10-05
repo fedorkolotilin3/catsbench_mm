@@ -8,6 +8,10 @@ from lightning import LightningModule
 class BaseMethod(LightningModule, ABC):
     """Common base class for all benchmark methods."""
 
+    # ThroughputMonitor treats this attribute as optional. Keeping it explicit
+    # disables FLOP estimation without emitting a warning on every run.
+    flops_per_batch: int | None = None
+
     @abstractmethod
     def sample(self, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         raise NotImplementedError

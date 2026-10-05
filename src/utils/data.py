@@ -5,6 +5,14 @@ import torch
 from torch.utils.data import Dataset
 
 
+def get_batch_size(batch: Any) -> int:
+    """Return the per-device sample count for Lightning throughput logging."""
+    samples = batch.encoded[0] if hasattr(batch, "encoded") else batch[0]
+    if samples is None:
+        raise ValueError("Cannot determine batch size from an empty batch")
+    return len(samples)
+
+
 def broadcast(tensor: torch.Tensor, num_add_dims: int, dim: int = -1) -> torch.Tensor:
     if dim < 0:
         dim += tensor.dim() + 1

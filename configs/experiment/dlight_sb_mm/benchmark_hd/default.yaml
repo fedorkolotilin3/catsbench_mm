@@ -8,6 +8,7 @@ defaults:
     - model_checkpoint
     - model_summary
     - progress_bar
+    - training_monitor
     - benchmark_hd_metrics
   - override /logger: csv
   - override /trainer: gpu

@@ -1,0 +1,10 @@
+throughput_monitor:
+  _target_: lightning.pytorch.callbacks.ThroughputMonitor
+  batch_size_fn:
+    _target_: src.utils.data.get_batch_size
+    _partial_: true
+  window_size: 10
+
+device_stats_monitor:
+  _target_: lightning.pytorch.callbacks.DeviceStatsMonitor
+  cpu_stats: false
