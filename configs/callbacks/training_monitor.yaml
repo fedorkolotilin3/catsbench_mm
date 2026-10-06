@@ -1,5 +1,5 @@
 throughput_monitor:
-  _target_: lightning.pytorch.callbacks.ThroughputMonitor
+  _target_: src.callbacks.TrainOnlyThroughputMonitor
   batch_size_fn:
     _target_: src.utils.data.get_batch_size
     _partial_: true
