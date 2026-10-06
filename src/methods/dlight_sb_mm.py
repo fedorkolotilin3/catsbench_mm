@@ -178,6 +178,12 @@ class DLightSBMM(DLightSB):
         self.log("train/iteration", self.iteration, prog_bar=True)
         return {"loss": self.log_alpha.new_tensor(info["loss"]), "batch": batch}
 
+    @torch.no_grad()
+    def compilation_warmup_step(self, batch, optimizer) -> None:
+        """Execute the complete analytic MM path without Lightning logging."""
+        x0, x1 = batch
+        optimizer.step(closure=lambda: self.mm_step(x0, x1))
+
     @classmethod
     def from_model(cls, model: DLightSB, *, state_dict=None, tol=None):
         """Copy a DLightSB; optionally restore its pre-training weights.

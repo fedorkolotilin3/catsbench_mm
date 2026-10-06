@@ -302,6 +302,18 @@ class DLightSB(BaseMethod):
         self.log('train/iteration', self.iteration, prog_bar=True)
         return {'loss': loss, 'batch': batch}
 
+    def compilation_warmup_step(
+        self,
+        batch: Batch,
+        optimizer: torch.optim.Optimizer,
+    ) -> None:
+        """Execute the complete gradient-training path without logging."""
+        x_start, x_end = batch
+        optimizer.zero_grad(set_to_none=True)
+        loss, _ = self.loss(x_start, x_end)
+        loss.backward()
+        optimizer.step()
+
     def on_train_epoch_end(self) -> None:
         self.iteration += 1
 
