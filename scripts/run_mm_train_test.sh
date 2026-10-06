@@ -50,6 +50,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
+  logger=csv_tensorboard \
   logger.csv.version=train \
   '++callbacks.plotter_callback=null'
 
@@ -60,6 +61,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
   "trainer.accelerator=${MM_DEVICE}" \
   trainer.devices=1 \
+  logger=csv_tensorboard \
   logger.csv.version=test \
   '++callbacks.plotter_callback=null'
 

@@ -29,7 +29,7 @@ export CATS_MPLBACKEND="${CATS_MPLBACKEND:-Agg}"
 echo "[baseline] training ${EXPERIMENT}"
 bash "${SCRIPT_DIR}/run_colab.sh" \
   "experiment=${EXPERIMENT}" \
-  logger=csv \
+  logger=csv_tensorboard \
   logger.csv.version=train \
   '++callbacks.plotter_callback=null'
 
@@ -38,7 +38,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   task_name=test \
   ckpt_path=auto \
   "experiment=${EXPERIMENT}" \
-  logger=csv \
+  logger=csv_tensorboard \
   logger.csv.version=test \
   '++callbacks.plotter_callback=null'
 

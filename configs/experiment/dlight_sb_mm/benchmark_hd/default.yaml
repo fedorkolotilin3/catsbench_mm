@@ -10,7 +10,7 @@ defaults:
     - progress_bar
     - training_monitor
     - benchmark_hd_metrics
-  - override /logger: csv
+  - override /logger: csv_tensorboard
   - override /trainer: gpu
   - _self_
 

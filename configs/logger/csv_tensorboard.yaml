@@ -1,0 +1,12 @@
+csv:
+  _target_: lightning.pytorch.loggers.csv_logs.CSVLogger
+  save_dir: ${paths.output_dir}
+  name: csv
+  version: train
+
+tensorboard:
+  _target_: lightning.pytorch.loggers.tensorboard.TensorBoardLogger
+  save_dir: ${paths.output_dir}
+  name: tensorboard
+  version: ${logger.csv.version}
+  default_hp_metric: false

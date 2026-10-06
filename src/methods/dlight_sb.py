@@ -296,7 +296,9 @@ class DLightSB(BaseMethod):
 
         # logs step-wise loss
         info = {f"train/{k}": v for k, v in info.items()}
-        self.log_dict(info, prog_bar=True, sync_dist=True) 
+        self.log_dict(info, prog_bar=True, sync_dist=True)
+        self.log("train/loss", loss, on_step=True, on_epoch=False,
+                 batch_size=len(x_start), sync_dist=True)
         self.log('train/iteration', self.iteration, prog_bar=True)
         return {'loss': loss, 'batch': batch}
 
