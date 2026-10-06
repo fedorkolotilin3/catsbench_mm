@@ -30,6 +30,7 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
         num_categories: int,
         num_cond_samples: int,
         num_timesteps: int,
+        validation_num_cond_samples: int = 100,
         train_test_split: Optional[float] = 0.8,
         classifier_lr: Optional[float] = 1e-2,
         adjusted_tv: bool = False,
@@ -40,6 +41,9 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
         self.num_timesteps = num_timesteps
 
         self.num_cond_samples = num_cond_samples
+        if validation_num_cond_samples < 1:
+            raise ValueError("validation_num_cond_samples must be positive")
+        self.validation_num_cond_samples = validation_num_cond_samples
         self.train_test_split = train_test_split
         self.classifier_lr = classifier_lr
         self.adjusted_tv = adjusted_tv
@@ -94,7 +98,10 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
                         ),
                     },
                 )
-            if callable(getattr(pl_module, 'get_transition_logits', None)):
+            if (
+                stage == 'test'
+                and callable(getattr(pl_module, 'get_transition_logits', None))
+            ):
                 if self.forward_kl_div is None:
                     self.forward_kl_div = TrajectoryKLDivergence(
                         dim=self.dim,
@@ -152,12 +159,22 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
             )
         else:
             assert self.cond_metrics is not None
-            repeated_x_start = x_start[0].unsqueeze(0).expand(self.num_cond_samples, -1)
+            num_cond_samples = (
+                self.validation_num_cond_samples
+                if stage == 'val'
+                else self.num_cond_samples
+            )
+            repeated_x_start = x_start[0].unsqueeze(0).expand(num_cond_samples, -1)
             cond_x_end = self.benchmark.sample(repeated_x_start)
             cond_pred_x_end = pl_module.sample(repeated_x_start)
             self.cond_metrics.update(cond_x_end, cond_pred_x_end)
 
-            if not callable(getattr(pl_module, 'get_transition_logits', None)):
+            # Intermediate validation deliberately omits trajectory sampling and
+            # KL. The final test keeps the complete, expensive evaluation.
+            if (
+                stage != 'test'
+                or not callable(getattr(pl_module, 'get_transition_logits', None))
+            ):
                 return
             assert self.forward_kl_div is not None
             assert self.reverse_kl_div is not None
@@ -223,7 +240,10 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
             pl_module.log_dict(cond_metrics)
             self.cond_metrics.reset()
 
-            if not callable(getattr(pl_module, 'get_transition_logits', None)):
+            if (
+                stage != 'test'
+                or not callable(getattr(pl_module, 'get_transition_logits', None))
+            ):
                 return
             assert self.forward_kl_div is not None
             assert self.reverse_kl_div is not None
