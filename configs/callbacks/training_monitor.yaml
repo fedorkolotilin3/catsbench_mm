@@ -5,6 +5,6 @@ throughput_monitor:
     _partial_: true
   window_size: 10
 
-device_stats_monitor:
-  _target_: lightning.pytorch.callbacks.DeviceStatsMonitor
-  cpu_stats: false
+gpu_memory_monitor:
+  _target_: src.callbacks.GpuMemoryMonitor
+  every_n_steps: 10
