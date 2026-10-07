@@ -5,7 +5,11 @@ defaults:
 
 data:
   dim: 16
-  batch_size: 32768
+  batch_size: 131072
+
+trainer:
+  max_expochs: 2000
+  check_val_every_n_epoch: 200
 
 prior:
   prior_type: gaussian
