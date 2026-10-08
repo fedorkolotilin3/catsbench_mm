@@ -22,5 +22,6 @@ class FitWorkflow(BaseWorkflow):
             model=method,
             datamodule=datamodule,
             ckpt_path=ckpt_path,
+            weights_only=False,
         )
         return trainer

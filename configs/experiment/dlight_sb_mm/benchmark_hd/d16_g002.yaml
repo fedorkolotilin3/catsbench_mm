@@ -9,6 +9,7 @@ data:
 
 trainer:
   max_epochs: 2000
+  max_steps: 2000
   check_val_every_n_epoch: 200
 
 prior:
