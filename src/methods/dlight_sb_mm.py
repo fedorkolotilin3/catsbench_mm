@@ -62,45 +62,16 @@ def _support_preserving_update_from_logs(
     return log_z
 
 
-def _stable_log_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Compute log(exp(log_a) @ exp(log_b)) without unscaled exponentiation.
+@torch.compile(fullgraph=True)
+def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
+    """Compile the broadcast addition and library reduction together.
 
-    This is the two-dimensional MM counterpart of catsbench.lse_matmul. Row
-    and column maxima make the common path a memory-efficient BLAS product.
-    If that scaled product still underflows, recompute only the affected output
-    rows with an exact logsumexp reduction.
+    Keep inputs in log space, including exact zeros represented by -inf.
+    TorchInductor can fuse the expression without a full broadcast temporary.
+    Requires a working Inductor toolchain (Triton on CUDA or a C++ compiler
+    on CPU). The first call for a new specialization includes compilation.
     """
-    if log_a.ndim != 2 or log_b.ndim != 2 or log_a.shape[1] != log_b.shape[0]:
-        raise ValueError("Expected compatible two-dimensional log matrices")
-    for value in (log_a, log_b):
-        if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log matrices may contain finite values and -inf only")
-
-    a_max = log_a.amax(dim=1, keepdim=True)
-    b_max = log_b.amax(dim=0, keepdim=True)
-    safe_a_max = torch.where(torch.isfinite(a_max), a_max, 0.0)
-    safe_b_max = torch.where(torch.isfinite(b_max), b_max, 0.0)
-    product = torch.exp(log_a - safe_a_max) @ torch.exp(log_b - safe_b_max)
-    valid_product = torch.isfinite(product) & (product > 0)
-    # Avoid evaluating log(0), log(NaN), or log(inf). Besides underflow, some
-    # BLAS implementations can return a non-finite value for an otherwise
-    # representable scaled product. Those entries use the exact log reduction.
-    result = torch.where(
-        valid_product,
-        product.clamp_min(torch.finfo(product.dtype).tiny).log()
-        + safe_a_max
-        + safe_b_max,
-        -torch.inf,
-    )
-
-    # Keep memory bounded by reducing one affected output row at a time.
-    bad_rows = torch.nonzero((~valid_product).any(dim=1), as_tuple=False).flatten()
-    for row in bad_rows.tolist():
-        exact = torch.logsumexp(log_a[row, :, None] + log_b, dim=0)
-        result[row] = torch.where(valid_product[row], result[row], exact)
-    if torch.isnan(result).any() or torch.isposinf(result).any():
-        raise FloatingPointError("Non-finite result in stable log-matrix product")
-    return result
+    return torch.logsumexp(log_a.unsqueeze(-1) + log_b.unsqueeze(-3), dim=-2)
 
 
 class _MMOptimizer(torch.optim.Optimizer):
@@ -274,7 +245,7 @@ class DLightSBMM(DLightSB):
         if invalid_log_r or invalid_log_beta or not torch.isfinite(log_beta).any():
             raise ValueError("Invalid initial potential parameters")
         log_u = torch.stack([
-            _stable_log_matmul(log_q[d], log_r[d]) for d in range(dim)
+            _logsumexp_matmul(log_q[d], log_r[d]) for d in range(dim)
         ])  # [D, N0, K]
 
         def log_normalizer():
@@ -348,13 +319,13 @@ class DLightSBMM(DLightSB):
                     + log_other
                     - old_log_c[:, None]
                 )
-                log_b_linear = _stable_log_matmul(
+                log_b_linear = _logsumexp_matmul(
                     log_q[d].T, log_coefficients
                 )  # [S,K]
                 log_r[d] = _support_preserving_update_from_logs(
                     log_b_linear.T, log_m[d].T, log_r[d].T
                 ).T
-                log_u[d] = _stable_log_matmul(log_q[d], log_r[d])
+                log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])
 
         bound_after, new_loss = surrogate().item(), objective().item()
         previous_loss = initial_loss.item()

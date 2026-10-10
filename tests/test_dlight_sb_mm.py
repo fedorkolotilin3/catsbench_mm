@@ -5,8 +5,42 @@ import torch
 from src.data.prior import Prior
 from src.methods.dlight_sb_mm import (
     DLightSBMM,
+    _logsumexp_matmul,
     _support_preserving_update_from_logs,
 )
+
+
+class CompiledLogsumexpTest(unittest.TestCase):
+    def test_extreme_logits_and_exact_zeros(self):
+        for dtype in (torch.float32, torch.float64):
+            with self.subTest(dtype=dtype), torch.no_grad():
+                # The old scaled GEMM clamped subnormals or lost terms here.
+                a = torch.tensor([[0., -100.], [0., -104.],
+                                  [-torch.inf, -torch.inf]], dtype=dtype)
+                b = torch.tensor([[-100., -103., -torch.inf],
+                                  [0., 0., -torch.inf]], dtype=dtype)
+                actual = _logsumexp_matmul(a, b)
+                expected = torch.logsumexp(
+                    a.double().unsqueeze(-1) + b.double().unsqueeze(-3), dim=-2
+                )
+                torch.testing.assert_close(actual, expected.to(dtype))
+                self.assertTrue(torch.isneginf(actual[-1]).all())
+                self.assertTrue(torch.isneginf(actual[:, -1]).all())
+
+    def test_transposed_inputs_and_changing_batch_size(self):
+        generator = torch.Generator().manual_seed(42)
+        with torch.no_grad():
+            for batch_size in (7, 11):
+                a = 100 * torch.randn(3, batch_size, generator=generator,
+                                      dtype=torch.float64)
+                b = 100 * torch.randn(5, batch_size, generator=generator,
+                                      dtype=torch.float64)
+                actual = _logsumexp_matmul(a, b.T)
+                expected = torch.stack([
+                    torch.stack([torch.logsumexp(row + col, dim=0) for col in b])
+                    for row in a
+                ])
+                torch.testing.assert_close(actual, expected)
 
 
 class NonnegativeBlockMinimumTest(unittest.TestCase):
