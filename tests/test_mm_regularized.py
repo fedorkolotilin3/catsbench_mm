@@ -117,6 +117,7 @@ class RegularizedMMTest(unittest.TestCase):
                 checkpoint, prior=model.prior, optimizer=None, weights_only=False
             )
             self.assertEqual(restored.hparams.regularization_lambda, .02)
+            self.assertTrue(all(not p.requires_grad for p in restored.parameters()))
             torch.testing.assert_close(restored.log_alpha, model.log_alpha)
             info = restored.mm_step(*self.data())
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)

@@ -11,6 +11,7 @@ import torch
 from .dlight_sb_mm import DLightSBMM
 
 
+@torch.no_grad()
 def _exponential_log_update(log_a, log_b, current_log_z, strength):
     """Minimize (a+lambda)*exp(u) - (b+lambda)*u without root finding."""
     if not math.isfinite(strength) or strength <= 0:
@@ -29,6 +30,7 @@ def _exponential_log_update(log_a, log_b, current_log_z, strength):
     return result
 
 
+@torch.no_grad()
 def _exponential_log_penalty(u):
     """exp(u)-u-1, with a local series to avoid cancellation near zero."""
     small = u.abs() < 1e-3
@@ -52,6 +54,7 @@ class DLightSBMMRegularized(DLightSBMM):
         super().__init__(*args, **kwargs)
         self.save_hyperparameters("regularization_lambda")
 
+    @torch.no_grad()
     def _regularization(self, log_beta, log_r):
         strength = self.hparams.regularization_lambda
         if strength == 0:
@@ -68,6 +71,7 @@ class DLightSBMMRegularized(DLightSBMM):
             log_a, log_b, current_log_z, self.hparams.regularization_lambda
         )
 
+    @torch.no_grad()
     def loss(self, true_x_start, true_x_end):
         data_loss, info = super().loss(true_x_start, true_x_end)
         penalty = self._regularization(self.log_alpha, self.log_cp_cores)

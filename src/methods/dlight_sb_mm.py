@@ -25,6 +25,7 @@ import torch
 from .dlight_sb import DLightSB
 
 
+@torch.no_grad()
 def _support_preserving_update_from_logs(
     log_a: torch.Tensor,
     log_b: torch.Tensor,
@@ -63,6 +64,7 @@ def _support_preserving_update_from_logs(
 
 
 @torch.compile(fullgraph=True)
+@torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
     """Compile the broadcast addition and library reduction together.
 
@@ -84,6 +86,7 @@ class _MMOptimizer(torch.optim.Optimizer):
     def __init__(self, params):
         super().__init__(params, defaults={})
 
+    @torch.no_grad()
     def step(self, closure=None):
         if closure is None:
             raise ValueError("An MM update closure is required")
@@ -111,6 +114,13 @@ class DLightSBMM(DLightSB):
         self.save_hyperparameters("inner_sweeps", "tol")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
+        # MM updates parameters analytically. Also keep inherited evaluation
+        # methods graph-free when called directly outside Lightning/no_grad.
+        self.requires_grad_(False)
+
+    @torch.no_grad()
+    def loss(self, true_x_start, true_x_end):
+        return super().loss(true_x_start, true_x_end)
 
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
@@ -130,6 +140,7 @@ class DLightSBMM(DLightSB):
         if self.hparams.tol is not None and self.trainer.num_training_batches != 1:
             raise ValueError("MM tolerance requires one full-dataset batch per epoch")
 
+    @torch.no_grad()
     def training_step(self, batch, batch_idx):
         x0, x1 = batch
         update_started = time.perf_counter()
