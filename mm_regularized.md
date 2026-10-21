@@ -13,7 +13,8 @@ F(\theta)=\widehat{\mathcal L}(\theta)
 Сумма берётся по всем элементам `log_alpha` и `log_cp_cores`
 `regularization_lambda` задаёт коэффициент перед суммой штрафов
 Нормировки на число параметров нет
-Значение по умолчанию `0.0001` задано в конфиге и ноутбуках запуска
+Значение `0.0001` задано в `configs/method/mm_regularized.yaml`
+Ноутбуки запуска используют конфиг без переопределения коэффициента
 Оно не эквивалентно `weight_decay=0.01` в AdamW
 
 ## Обновление блока
@@ -61,7 +62,7 @@ u_{\mathrm{new}}=\log(b+\lambda)-\log(a+\lambda)
 ## Запуск
 
 ```bash
-python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002 method.regularization_lambda=0.0001
+python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002
 ```
 
 Доступны также конфиги d2 и d64
