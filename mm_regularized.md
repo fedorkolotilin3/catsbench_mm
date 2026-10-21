@@ -1,4 +1,4 @@
-# MM с квадратичной регуляризацией логарифмов
+# MM с экспоненциально-линейной регуляризацией логарифмов
 
 Метод `mm_regularized` наследует `DLightSBMM` и использует те же E-шаг
 коэффициенты блочных задач и процедуры обучения и сэмплирования
@@ -7,13 +7,13 @@
 
 \[
 F(\theta)=\widehat{\mathcal L}(\theta)
-+\frac{\lambda}{2}\left[\sum_k(\log\beta_k)^2
-+\sum_{k,d,s}(\log r_k^d[s])^2\right]
++\lambda\sum_{u\in\theta_{\log}}\left(e^u-u-1\right)
 \]
 
-`regularization_lambda` задаёт коэффициент перед суммой квадратов
+Сумма берётся по всем элементам `log_alpha` и `log_cp_cores`
+`regularization_lambda` задаёт коэффициент перед суммой штрафов
 Нормировки на число параметров нет
-Значение по умолчанию `0.01` является начальной настройкой для экспериментов
+Значение по умолчанию `0.0001` задано в конфиге и ноутбуках запуска
 Оно не эквивалентно `weight_decay=0.01` в AdamW
 
 ## Обновление блока
@@ -26,21 +26,23 @@ u=\log z
 \]
 
 \[
-\min_u\; ae^u-bu+\frac{\lambda}{2}u^2
+\min_u\; ae^u-bu+\lambda\left(e^u-u-1\right)
 \]
 
 При положительном коэффициенте регуляризации минимум единственен
 
 \[
-ae^u-b+\lambda u=0
+(a+\lambda)e^u=b+\lambda
 \]
 
 \[
-ae^u+\lambda>0
+u_{\mathrm{new}}=\log(b+\lambda)-\log(a+\lambda)
 \]
 
-Реализация использует векторизованную бисекцию с вычислением знака
-производной в логарифмическом масштабе
+Реализация использует явное обновление через `torch.logaddexp` без бисекции
+Для точного вычисления штрафа около нуля используется локальный ряд
+Штраф растёт линейно при больших отрицательных логарифмах
+и экспоненциально при больших положительных
 При нулевой статистике координата остаётся строго положительной
 Исходные параметры должны быть строго положительными
 
@@ -59,7 +61,7 @@ ae^u+\lambda>0
 ## Запуск
 
 ```bash
-python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002 method.regularization_lambda=0.01
+python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002 method.regularization_lambda=0.0001
 ```
 
 Доступны также конфиги d2 и d64
@@ -84,7 +86,7 @@ from src.methods.mm_regularized import DLightSBMMRegularized
 
 solver = DLightSBMMRegularized.from_model(
     model,
-    regularization_lambda=0.01,
+    regularization_lambda=0.0001,
 )
 ```
 
