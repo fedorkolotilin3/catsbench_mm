@@ -1,0 +1,6 @@
+# @package _global_
+
+defaults:
+  - /experiment/dlight_sb_mm/benchmark_hd/d64_g002
+  - override /method: mm_regularized
+  - _self_

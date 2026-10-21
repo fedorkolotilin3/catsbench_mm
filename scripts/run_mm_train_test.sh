@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MM_THREADS="${MM_NUM_THREADS:-$(nproc)}"
 MM_DEVICE="${MM_DEVICE:-cpu}"
 EXPERIMENT="${MM_EXPERIMENT:-dlight_sb_mm/benchmark_hd/d2_g002}"
+EXTRA_OVERRIDES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,8 +20,13 @@ while [[ $# -gt 0 ]]; do
       EXPERIMENT="$2"
       shift 2
       ;;
+    --regularization-lambda)
+      [[ $# -ge 2 ]] || { echo "--regularization-lambda requires a coefficient" >&2; exit 2; }
+      EXTRA_OVERRIDES+=("method.regularization_lambda=$2")
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT]"
+      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT] [--regularization-lambda VALUE]"
       exit 0
       ;;
     *)
@@ -52,7 +58,8 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   trainer.devices=1 \
   logger=csv_tensorboard \
   logger.csv.version=train \
-  '++callbacks.plotter_callback=null'
+  '++callbacks.plotter_callback=null' \
+  "${EXTRA_OVERRIDES[@]}"
 
 echo "[mm] testing last checkpoint"
 bash "${SCRIPT_DIR}/run_colab.sh" \
@@ -63,6 +70,7 @@ bash "${SCRIPT_DIR}/run_colab.sh" \
   trainer.devices=1 \
   logger=csv_tensorboard \
   logger.csv.version=test \
-  '++callbacks.plotter_callback=null'
+  '++callbacks.plotter_callback=null' \
+  "${EXTRA_OVERRIDES[@]}"
 
 echo "[mm] train and test completed"

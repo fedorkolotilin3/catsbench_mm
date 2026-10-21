@@ -115,6 +115,13 @@ class DLightSBMM(DLightSB):
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
+    def _update_block(self, log_a, log_b, current_log_z):
+        return _support_preserving_update_from_logs(log_a, log_b, current_log_z)
+
+    def _regularization(self, log_beta, log_r):
+        """Same penalty is added to the objective and its touching bound."""
+        return log_beta.new_zeros(())
+
     def on_train_start(self):
         if self.dtype not in (torch.float32, torch.float64):
             raise ValueError("MM requires float32 or float64 parameters")
@@ -156,7 +163,7 @@ class DLightSBMM(DLightSB):
         optimizer.step(closure=lambda: self.mm_step(x0, x1))
 
     @classmethod
-    def from_model(cls, model: DLightSB, *, state_dict=None, tol=None):
+    def from_model(cls, model: DLightSB, *, state_dict=None, tol=None, **solver_kwargs):
         """Copy a DLightSB; optionally restore its pre-training weights.
 
         The copied solver preserves the model's device and floating-point dtype.
@@ -171,7 +178,7 @@ class DLightSBMM(DLightSB):
         with torch.device(model.device):
             solver = cls(
                 prior=deepcopy(model.prior),
-                optimizer=None, scheduler=None, tol=tol,
+                optimizer=None, scheduler=None, tol=tol, **solver_kwargs,
                 **{key: model.hparams[key] for key in keys},
             ).to(device=model.device, dtype=model.dtype)
         solver.load_state_dict(model.state_dict() if state_dict is None else state_dict)
@@ -264,7 +271,8 @@ class DLightSBMM(DLightSB):
 
         def objective():
             source_term, target_term = objective_terms()
-            return weight0 @ source_term - weight1 @ target_term
+            return (weight0 @ source_term - weight1 @ target_term
+                    + self._regularization(log_beta, log_r))
 
         initial_loss = objective()
         if not torch.isfinite(initial_loss):
@@ -297,7 +305,8 @@ class DLightSBMM(DLightSB):
             core_term = torch.where(
                 torch.isfinite(log_m), log_m.exp() * log_r, 0.0
             ).sum()
-            return weight0 @ ratio - beta_term - core_term
+            return (weight0 @ ratio - beta_term - core_term
+                    + self._regularization(log_beta, log_r))
 
         bound_before = surrogate().item()
         for _ in range(inner_sweeps):
@@ -305,7 +314,7 @@ class DLightSBMM(DLightSB):
             log_a = torch.logsumexp(
                 log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
             )
-            log_beta = _support_preserving_update_from_logs(log_a, log_n, log_beta)
+            log_beta = self._update_block(log_a, log_n, log_beta)
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -322,7 +331,7 @@ class DLightSBMM(DLightSB):
                 log_b_linear = _logsumexp_matmul(
                     log_q[d].T, log_coefficients
                 )  # [S,K]
-                log_r[d] = _support_preserving_update_from_logs(
+                log_r[d] = self._update_block(
                     log_b_linear.T, log_m[d].T, log_r[d].T
                 ).T
                 log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])

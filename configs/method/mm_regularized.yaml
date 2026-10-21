@@ -1,0 +1,9 @@
+defaults:
+  - dlight_sb_mm
+  - _self_
+
+_target_: src.methods.mm_regularized.DLightSBMMRegularized
+
+# Coefficient of the SUM of squared log parameters divided by two.
+# This is not numerically equivalent to AdamW weight_decay.
+regularization_lambda: 0.01
