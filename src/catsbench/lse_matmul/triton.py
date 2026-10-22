@@ -29,8 +29,10 @@ class TritonLSEMatmul(Function):
         if eps < 0:
             raise ValueError(f"eps must be non-negative, got {eps}.")
 
-        a = a.float()
-        b = b.float()
+        # Preserve double precision if either operand is float64.
+        dtype = torch.float64 if torch.float64 in (a.dtype, b.dtype) else torch.float32
+        a = a.to(dtype=dtype)
+        b = b.to(dtype=dtype)
 
         m, k, n = a.shape[-2], a.shape[-1], b.shape[-1]
         c_batch_dims = torch.broadcast_shapes(a.shape[:-2], b.shape[:-2])
@@ -40,7 +42,7 @@ class TritonLSEMatmul(Function):
 
         a_view = a.expand(*c_batch_dims, m, k)
         b_view = b.expand(*c_batch_dims, k, n)
-        c = torch.empty((*c_batch_dims, m, n), device=a.device, dtype=torch.float32)
+        c = torch.empty((*c_batch_dims, m, n), device=a.device, dtype=dtype)
 
         sa = a_view.stride()[:-2]
         sb = b_view.stride()[:-2]
@@ -81,12 +83,12 @@ class TritonLSEMatmul(Function):
         a_view, b_view, c = ctx.saved_tensors
         use_exp2 = ctx.use_exp2
 
-        # Use float32 for stability
-        g = grad_out.float()
+        # Match the forward computation precision.
+        g = grad_out.to(dtype=c.dtype)
 
         # Allocate full grads in expanded shapes, then sum_to_size like before
-        dA_full = torch.empty_like(a_view, dtype=torch.float32)
-        dB_full = torch.empty_like(b_view, dtype=torch.float32)
+        dA_full = torch.empty_like(a_view, dtype=c.dtype)
+        dB_full = torch.empty_like(b_view, dtype=c.dtype)
 
         m, k, n = a_view.shape[-2], a_view.shape[-1], b_view.shape[-1]
         c_batch_dims = c.shape[:-2]
@@ -166,6 +168,11 @@ def triton_lse_matmul(
     use_exp2: bool = True,
     eps: float = 0.0,
 ) -> torch.Tensor:
+    """Use float64 arithmetic if either input is double, otherwise float32.
+
+    The output and backward accumulators use this computation dtype. Autograd
+    returns each input's gradient in that input's original dtype.
+    """
     if a.shape[-1] != b.shape[-2]:
         raise ValueError(
             f"Inner dimension mismatch: {a.shape[-1]} != {b.shape[-2]}"
