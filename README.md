@@ -83,7 +83,6 @@ git switch experiment/mm-exp-regularized
 - `analyze_dlight_sb_pair.ipynb` версия анализа для Colab
 - `benchmark_usage.ipynb` интерфейс HD benchmark
 - `benchmark_baselines.ipynb` эталонные baseline расчёты
-- `adamw_from_mm.ipynb` диагностический запуск AdamW из параметров MM
 
 Подробности находятся в `DOCUMENTATION_RU.md` и `COLAB_GITHUB_RU.md`
 
