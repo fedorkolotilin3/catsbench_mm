@@ -21,6 +21,7 @@ except ImportError:  # resource is unavailable in native Windows Python
     resource = None
 
 import torch
+from catsbench.utils import lse_matmul
 
 from .dlight_sb import DLightSB
 
@@ -63,17 +64,10 @@ def _support_preserving_update_from_logs(
     return log_z
 
 
-@torch.compile(fullgraph=True)
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Compile the broadcast addition and library reduction together.
-
-    Keep inputs in log space, including exact zeros represented by -inf.
-    TorchInductor can fuse the expression without a full broadcast temporary.
-    Requires a working Inductor toolchain (Triton on CUDA or a C++ compiler
-    on CPU). The first call for a new specialization includes compilation.
-    """
-    return torch.logsumexp(log_a.unsqueeze(-1) + log_b.unsqueeze(-3), dim=-2)
+    """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
+    return lse_matmul(log_a, log_b, implementation="triton")
 
 
 class _MMOptimizer(torch.optim.Optimizer):
