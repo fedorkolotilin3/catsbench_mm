@@ -26,6 +26,8 @@ class TrajectoryKLDivergence(KLDivergence):
                 'Expected `p` and `q` to have the same shape with at least 3 dimensions, '
                 f'but got p: {p.shape}, q: {q.shape}.'
             )
+        dtype = torch.promote_types(p.dtype, q.dtype)
+        p, q = p.to(dtype=dtype), q.to(dtype=dtype)
         if self.logits:
             p = p.log_softmax(dim=-1)
             q = q.log_softmax(dim=-1)

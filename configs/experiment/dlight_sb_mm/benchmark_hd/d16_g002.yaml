@@ -5,11 +5,11 @@ defaults:
 
 data:
   dim: 16
-  batch_size: 131072
+  batch_size: 65536
 
 trainer:
-  max_epochs: 6000
-  max_steps: 6000
+  max_epochs: 2000
+  max_steps: 2000
   check_val_every_n_epoch: 200
 
 prior:

@@ -1,20 +1,15 @@
 import triton
 import triton.language as tl
+from . import triton_math
 
 
 MAX_BATCH_DIMS = 6
 
 def _lse_autotune_configs() -> list[triton.Config]:
+    # One conservative tile avoids compiling large unrolled float64 libdevice kernels.
+    # A single configuration also skips the autotuning benchmark sweep.
     return [
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 16}, num_warps=8, num_stages=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 16}, num_warps=4, num_stages=4),
-        triton.Config({"BLOCK_M": 32,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=2, num_stages=4),
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 32,  "BLOCK_K": 32}, num_warps=2, num_stages=4),
-        triton.Config({"BLOCK_M": 32,  "BLOCK_N": 32,  "BLOCK_K": 32}, num_warps=2, num_stages=4),
+        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 8}, num_warps=4, num_stages=2),
     ]
 
 
@@ -37,8 +32,9 @@ def _lse_fwd_kernel(
     USE_EXP2: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    log2e = 1.4426950408889634
-    ln2 = 0.6931471805599453
+    ACC_DTYPE: tl.constexpr = tl.float64 if A_ptr.dtype.element_ty == tl.float64 else tl.float32
+    log2e = tl.full((), 1.4426950408889634, ACC_DTYPE)
+    ln2 = tl.full((), 0.6931471805599453, ACC_DTYPE)
 
     pid_b = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
@@ -78,12 +74,12 @@ def _lse_fwd_kernel(
     rn = tl.where(mask_n, offs_n, 0).to(tl.int64)
 
     # Running logsumexp over K for each (m, n) element
-    m_acc = tl.full((BLOCK_M, BLOCK_N), -float("inf"), tl.float32)
-    s_acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    m_acc = tl.full((BLOCK_M, BLOCK_N), -float("inf"), ACC_DTYPE)
+    s_acc = tl.zeros((BLOCK_M, BLOCK_N), ACC_DTYPE)
     for k0 in range(0, K, BLOCK_K):
 
-        blk_max = tl.full((BLOCK_M, BLOCK_N), -float("inf"), tl.float32)
-        blk_sum = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+        blk_max = tl.full((BLOCK_M, BLOCK_N), -float("inf"), ACC_DTYPE)
+        blk_sum = tl.zeros((BLOCK_M, BLOCK_N), ACC_DTYPE)
         for kk in tl.static_range(0, BLOCK_K):
             k = k0 + kk
             mk = k < K
@@ -92,41 +88,41 @@ def _lse_fwd_kernel(
                 A_ptr + off_a + rm[:, None] * stride_am + k * stride_ak,
                 mask=mask_m[:, None] & mk,
                 other=-float("inf"),
-            ).to(tl.float32)
+            ).to(ACC_DTYPE)
 
             b_k = tl.load(
                 B_ptr + off_b + k * stride_bk + rn[None, :] * stride_bn,
                 mask=mask_n[None, :] & mk,
                 other=-float("inf"),
-            ).to(tl.float32)
+            ).to(ACC_DTYPE)
 
             v = a_k + b_k
             if USE_EXP2:
                 v2 = v * log2e
                 new = tl.maximum(blk_max, v2)
                 blk_sum = blk_sum * \
-                    tl.where(blk_max == float("-inf"), 0.0, tl.exp2(blk_max - new)) + \
-                    tl.where(v2 == float("-inf"), 0.0, tl.exp2(v2 - new))
+                    tl.where(blk_max == float("-inf"), 0.0, triton_math.exp2(blk_max - new)) + \
+                    tl.where(v2 == float("-inf"), 0.0, triton_math.exp2(v2 - new))
             else:
                 new = tl.maximum(blk_max, v)
                 blk_sum = blk_sum * \
-                    tl.where(blk_max == float("-inf"), 0.0, tl.exp(blk_max - new)) + \
-                    tl.where(v == float("-inf"), 0.0, tl.exp(v - new))
+                    tl.where(blk_max == float("-inf"), 0.0, triton_math.exp(blk_max - new)) + \
+                    tl.where(v == float("-inf"), 0.0, triton_math.exp(v - new))
             blk_max = new
 
         new_m = tl.maximum(m_acc, blk_max)
         if USE_EXP2:
-            s_acc = s_acc * tl.where(m_acc == float("-inf"), 0.0, tl.exp2(m_acc - new_m)) + \
-                    blk_sum * tl.where(blk_max == float("-inf"), 0.0, tl.exp2(blk_max - new_m)) 
+            s_acc = s_acc * tl.where(m_acc == float("-inf"), 0.0, triton_math.exp2(m_acc - new_m)) + \
+                    blk_sum * tl.where(blk_max == float("-inf"), 0.0, triton_math.exp2(blk_max - new_m))
         else:
-            s_acc = s_acc * tl.where(m_acc == float("-inf"), 0.0, tl.exp(m_acc - new_m)) + \
-                    blk_sum * tl.where(blk_max == float("-inf"), 0.0, tl.exp(blk_max - new_m)) 
+            s_acc = s_acc * tl.where(m_acc == float("-inf"), 0.0, triton_math.exp(m_acc - new_m)) + \
+                    blk_sum * tl.where(blk_max == float("-inf"), 0.0, triton_math.exp(blk_max - new_m))
         m_acc = new_m
 
     if USE_EXP2:
-        out = (m_acc + tl.log2(s_acc)) * ln2
+        out = (m_acc + triton_math.log2(s_acc)) * ln2
     else:
-        out = m_acc + tl.log(s_acc)
+        out = m_acc + triton_math.log(s_acc)
     out = tl.where(s_acc > 0, out, float("-inf"))
 
     tl.store(

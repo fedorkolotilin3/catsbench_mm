@@ -21,7 +21,7 @@ class BenchmarkHDConfig(BenchmarkBaseConfig):
 
 class BenchmarkHD(BenchmarkBase):
     def __init__(
-        self, 
+        self,
         config: BenchmarkHDConfig,
         *,
         num_timesteps: Optional[int] = None,
@@ -32,22 +32,22 @@ class BenchmarkHD(BenchmarkBase):
         self.sample_quantize_range = tuple(config.sample_quantize_range)
         super().__init__(config, num_timesteps)
         self.register_buffers(init_benchmark, device)
-            
+
     @property
     def name(self) -> str:
         return f'hd_' + super().name
-    
+
     @torch.no_grad()
     def _sample_input(self, num_samples: int) -> torch.LongTensor:
         '''Sample independent source data'''
         if self.input_distribution == 'gaussian':
             samples = continuous_to_discrete(
-                torch.randn(size=[num_samples, self.dim], device=self.device), 
+                torch.randn(size=[num_samples, self.dim], device=self.device, dtype=self.log_cp_cores.dtype),
                 self.num_categories, quantize_range=self.sample_quantize_range
             )
         elif self.input_distribution == 'uniform':
             samples = continuous_to_discrete(
-                6 * torch.rand(size=(num_samples, self.dim), device=self.device) - 3,
+                6 * torch.rand(size=(num_samples, self.dim), device=self.device, dtype=self.log_cp_cores.dtype) - 3,
                 self.num_categories, quantize_range=self.sample_quantize_range
             )
         else:
@@ -59,7 +59,7 @@ class BenchmarkHD(BenchmarkBase):
         if use_pca:
             pca = PCA(n_components=2)
             pca.fit(convert_to_numpy(torch.cat(
-                [self.input_dataset, self.target_dataset], 
+                [self.input_dataset, self.target_dataset],
                 dim=0
             )))
 
@@ -68,12 +68,12 @@ class BenchmarkHD(BenchmarkBase):
         x_end = convert_to_numpy(self.target_dataset[:num_samples])
         if self.reverse:
             pred_x_end = convert_to_numpy(self.sample(
-                self.target_dataset[:num_samples], 
+                self.target_dataset[:num_samples],
                 use_onestep_sampling=True
             ))
         else:
             pred_x_end = convert_to_numpy(self.sample(
-                self.input_dataset[:num_samples], 
+                self.input_dataset[:num_samples],
                 use_onestep_sampling=True
             ))
         if use_pca:
@@ -90,16 +90,16 @@ class BenchmarkHD(BenchmarkBase):
             x_start[:, 0], x_start[:, 1],
             label=r'$p_{start}$', s=kwargs.get('s', 35),
             c='green', edgecolor='black'
-        ) 
+        )
         axs[1].scatter(
             x_end[:, 0], x_end[:, 1],
-            label=r'$p_{end}$', s=kwargs.get('s', 35),  
-            c='orange', edgecolor='black'    
+            label=r'$p_{end}$', s=kwargs.get('s', 35),
+            c='orange', edgecolor='black'
         )
         axs[2].scatter(
             pred_x_end[:, 0], pred_x_end[:, 1],
-            label=r'$p_{pred}$', s=kwargs.get('s', 35),  
-            c='salmon', edgecolor='black'    
+            label=r'$p_{pred}$', s=kwargs.get('s', 35),
+            c='salmon', edgecolor='black'
         )
 
         fig.suptitle('Benchmark samples', fontsize=16)
@@ -117,11 +117,11 @@ class BenchmarkHD(BenchmarkBase):
         fig.tight_layout(pad=0.5)
         plt.show()
         plt.close()
-    
+
     def _plot_trajectories(
-        self, 
-        num_samples: int, 
-        num_trajectories: int, 
+        self,
+        num_samples: int,
+        num_trajectories: int,
         num_translations: int,
         **kwargs
     ):
@@ -129,7 +129,7 @@ class BenchmarkHD(BenchmarkBase):
         if use_pca:
             pca = PCA(n_components=2)
             pca.fit(convert_to_numpy(torch.cat(
-                [self.input_dataset, self.target_dataset], 
+                [self.input_dataset, self.target_dataset],
                 dim=0
             )))
 
@@ -152,19 +152,19 @@ class BenchmarkHD(BenchmarkBase):
 
         # plot samples
         fig, ax = plt.subplots(
-            1, 1, dpi=kwargs.get('dpi', 100), 
+            1, 1, dpi=kwargs.get('dpi', 100),
             figsize=kwargs.get('fig_size', (8, 8))
         )
         ax.scatter(
             x_start[:, 0], x_start[:, 1],
             label='Start distribution', s=kwargs.get('s', 100),
-            c='grey', edgecolor='black', zorder=1, alpha=0.3, 
+            c='grey', edgecolor='black', zorder=1, alpha=0.3,
             linewidth=kwargs.get('linewidth', 0.8)
         )
         ax.scatter(
             x_end[:, 0], x_end[:, 1],
             label='Fitted distribution', s=kwargs.get('s', 100),
-            c='salmon', edgecolor='black', zorder=2, 
+            c='salmon', edgecolor='black', zorder=2,
             linewidth=kwargs.get('linewidth', 0.8)
         )
         ax.scatter(
@@ -173,7 +173,7 @@ class BenchmarkHD(BenchmarkBase):
             c='lime', edgecolor='black', zorder=4
         )
         ax.scatter(
-            trajectories[-1, :, 0], trajectories[-1, :, 1], 
+            trajectories[-1, :, 0], trajectories[-1, :, 1],
             label=r'Trajectory end ($y \sim p_{end}$)', s=kwargs.get('s', 80),
             c='yellow', edgecolor='black', zorder=4
         )

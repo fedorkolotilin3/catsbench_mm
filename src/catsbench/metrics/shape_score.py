@@ -53,7 +53,7 @@ class ShapeScore(Metric):
     ) -> torch.Tensor:
         pooled_counts = real_counts + pred_counts
         pooled_totals = real_totals + pred_totals
-        pooled_probs = pooled_counts.float() / (
+        pooled_probs = pooled_counts.to(dtype=torch.float64) / (
             pooled_totals + torch.finfo(pooled_totals.dtype).eps
         )
 
@@ -74,11 +74,11 @@ class ShapeScore(Metric):
         return (0.5 * expected_l1).clamp(max=1.0 - torch.finfo(expected_l1.dtype).eps)
 
     def _compute_score(self, real_counts: torch.Tensor, pred_counts: torch.Tensor) -> torch.Tensor:
-        real_totals = real_counts.sum(dim=1, keepdim=True).float()
-        pred_totals = pred_counts.sum(dim=1, keepdim=True).float()
+        real_totals = real_counts.sum(dim=1, keepdim=True).to(dtype=torch.float64)
+        pred_totals = pred_counts.sum(dim=1, keepdim=True).to(dtype=torch.float64)
 
-        reals = real_counts.float() / (real_totals + torch.finfo(real_totals.dtype).eps)
-        preds = pred_counts.float() / (pred_totals + torch.finfo(pred_totals.dtype).eps)
+        reals = real_counts.to(dtype=torch.float64) / (real_totals + torch.finfo(real_totals.dtype).eps)
+        preds = pred_counts.to(dtype=torch.float64) / (pred_totals + torch.finfo(pred_totals.dtype).eps)
         
         tvd = 0.5 * torch.abs(reals - preds).sum(dim=1) 
         if not self.adjusted:

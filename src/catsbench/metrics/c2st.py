@@ -27,9 +27,9 @@ class ClassifierTwoSampleTest(Metric):
         self.lr = lr
         self.hid_size = hid_size
         self.model = nn.Sequential(
-            nn.Linear(dim * num_categories, hid_size),
+            nn.Linear(dim * num_categories, hid_size, dtype=torch.float64),
             nn.ReLU(),
-            nn.Linear(hid_size, 1)
+            nn.Linear(hid_size, 1, dtype=torch.float64)
         )
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
         self.criterion = nn.BCEWithLogitsLoss()
@@ -65,7 +65,7 @@ class ClassifierTwoSampleTest(Metric):
     def _process_input(self, x: torch.Tensor) -> torch.Tensor:
         x = x.detach().long()
         x_onehot = F.one_hot(x, num_classes=self.num_categories)
-        return x_onehot.flatten(start_dim=1).float()
+        return x_onehot.flatten(start_dim=1).to(dtype=next(self.model.parameters()).dtype)
 
     def update(self, real_data: torch.Tensor, pred_data: torch.Tensor, train: bool) -> None:
         if train:
@@ -76,8 +76,8 @@ class ClassifierTwoSampleTest(Metric):
 
                 x = torch.cat([x_real, x_pred], dim=0)
                 y = torch.cat([
-                    torch.ones(x_real.shape[0], device=x.device),
-                    torch.zeros(x_pred.shape[0], device=x.device)
+                    torch.ones(x_real.shape[0], device=x.device, dtype=x.dtype),
+                    torch.zeros(x_pred.shape[0], device=x.device, dtype=x.dtype)
                 ], dim=0)
                 loss = self.criterion(self.model(x).squeeze(-1), y)
                 self.optimizer.zero_grad(set_to_none=True)
@@ -92,8 +92,8 @@ class ClassifierTwoSampleTest(Metric):
 
                 x = torch.cat([x_real, x_pred], dim=0)
                 y = torch.cat([
-                    torch.ones(x_real.shape[0], device=x.device),
-                    torch.zeros(x_pred.shape[0], device=x.device)
+                    torch.ones(x_real.shape[0], device=x.device, dtype=x.dtype),
+                    torch.zeros(x_pred.shape[0], device=x.device, dtype=x.dtype)
                 ], dim=0)
                 probs = torch.sigmoid(self.model(x).squeeze(-1)).detach()
             self.probs.append(probs)
@@ -101,7 +101,7 @@ class ClassifierTwoSampleTest(Metric):
 
     def compute(self) -> torch.Tensor:
         if len(self.probs) == 0:
-            return torch.tensor(-1.2345, dtype=torch.float)
+            return torch.tensor(-1.2345, dtype=torch.float64)
         probs = dim_zero_cat(self.probs)
         targets = dim_zero_cat(self.targets)
         auroc_value = auroc(probs, targets, task='binary')

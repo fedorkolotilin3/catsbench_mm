@@ -6,6 +6,11 @@ import torch
 from torch.autograd import Function
 
 
+def _promoted_operands(a, b):
+    dtype = torch.promote_types(torch.promote_types(a.dtype, b.dtype), torch.float32)
+    return a.to(dtype=dtype), b.to(dtype=dtype)
+
+
 def _validate_eps(eps: float) -> None:
     if eps < 0:
         raise ValueError(f"eps must be non-negative, got {eps}.")
@@ -41,15 +46,15 @@ def normalized_lse_matmul(
     by one. No normalization checks are performed in this hot path.
     """
     _validate_eps(eps)
-    product = torch.matmul(a.float().exp(), b.float().exp())
+    a, b = _promoted_operands(a, b)
+    product = torch.matmul(a.exp(), b.exp())
     return torch.log(product + eps)
 
 
 def _scaled_operands(
     a: torch.Tensor, b: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    a = a.float()
-    b = b.float()
+    a, b = _promoted_operands(a, b)
     a_max = a.amax(dim=-1, keepdim=True)
     b_max = b.amax(dim=-2, keepdim=True)
 
@@ -71,8 +76,7 @@ class _AnyLogitsLSEMatmul(Function):
     @staticmethod
     def forward(ctx, a: torch.Tensor, b: torch.Tensor, eps: float):
         _validate_eps(eps)
-        a = a.float()
-        b = b.float()
+        a, b = _promoted_operands(a, b)
         scaled_a, scaled_b, a_max, b_max = _scaled_operands(a, b)
         product = torch.matmul(scaled_a, scaled_b)
         shift = a_max + b_max
@@ -101,7 +105,7 @@ class _AnyLogitsLSEMatmul(Function):
             _, _, a_max, b_max = _scaled_operands(a, b)
             denominator = product + ctx.eps * torch.exp(-(a_max + b_max))
         normalized_grad = torch.where(
-            denominator > 0, grad_out.float() / denominator, 0.0
+            denominator > 0, grad_out.to(dtype=denominator.dtype) / denominator, 0.0
         )
 
         d_a = None

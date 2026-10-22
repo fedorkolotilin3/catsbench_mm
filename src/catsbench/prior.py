@@ -51,7 +51,7 @@ def uniform_onestep(
     alpha: float, 
     num_categories: int, 
     step: int,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     alpha = 1 - (alpha * num_categories) / (num_categories - 1)
@@ -77,7 +77,7 @@ def gaussian_onestep(
     num_categories: int, 
     num_skip_steps: int,
     use_doubly_stochastic: bool = True,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     device: Union[str, torch.device] = 'cpu'
 ) -> torch.Tensor:
     max_distance = num_categories - 1
@@ -102,7 +102,7 @@ def gaussian_onestep(
 
         off_diag_mask = (diff != 0)
 
-        off_diag_probs = torch.exp(log_pi_vals) * off_diag_mask.float()
+        off_diag_probs = torch.exp(log_pi_vals) * off_diag_mask.to(dtype=dtype)
         diag_log = torch.log1p(-off_diag_probs.sum(dim=1, keepdim=True))
         
         log_p_onestep_mat = torch.full(
@@ -149,7 +149,7 @@ class Prior(nn.Module):
             'gaussian',
         ] = 'uniform',
         implementation: LSEImplementation = "normalized",
-        dtype: Union[str, torch.dtype] = torch.float32,
+        dtype: Union[str, torch.dtype] = torch.float64,
         device: Union[str, torch.device] = 'cpu'
     ) -> None:
         super().__init__()
@@ -164,7 +164,7 @@ class Prior(nn.Module):
         if eps < 0:
             raise ValueError(f'eps must be non-negative, got {eps}.')
         if isinstance(dtype, str):
-            dtype = getattr(torch, dtype, torch.float32)
+            dtype = getattr(torch, dtype, torch.float64)
 
         if prior_type == 'gaussian':
             log_p_onestep = gaussian_onestep(
@@ -289,11 +289,11 @@ class Prior(nn.Module):
         If logits is True, the output is summed over x_0 and transition matrix returned.''' 
         if not logits:
             x_start_logits = torch.log(
-                torch.nn.functional.one_hot(x_start, self.num_categories)
+                torch.nn.functional.one_hot(x_start, self.num_categories).to(dtype=self.dtype)
                 + torch.finfo(self.dtype).tiny
             )
         else:
-            x_start_logits = x_start.clone()
+            x_start_logits = x_start.to(dtype=self.dtype).clone()
         assert x_start_logits.shape == x_t.shape + (self.num_categories,), \
             f'x_start_logits.shape: {x_start_logits.shape}, x_t.shape: {x_t.shape}'
         x_start_logits = x_start_logits.to(self.dtype)
@@ -329,11 +329,11 @@ class Prior(nn.Module):
         If logits is True, the output is summed over x_1 and transition matrix returned.''' 
         if not logits:
             x_end_logits = torch.log(
-                torch.nn.functional.one_hot(x_end, self.num_categories)
+                torch.nn.functional.one_hot(x_end, self.num_categories).to(dtype=self.dtype)
                 + torch.finfo(self.dtype).tiny
             )
         else:
-            x_end_logits = x_end.clone()
+            x_end_logits = x_end.to(dtype=self.dtype).clone()
         assert x_end_logits.shape == x_t.shape + (self.num_categories,), \
             f'x_end_logits.shape: {x_end_logits.shape}, x_t.shape: {x_t.shape}'
 

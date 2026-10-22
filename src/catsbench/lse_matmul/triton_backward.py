@@ -1,16 +1,15 @@
 import triton
 import triton.language as tl
+from . import triton_math
 
 
 MAX_BATCH_DIMS = 6
 
 def _lse_bwd_autotune_configs() -> list[triton.Config]:
+    # One conservative tile avoids compiling large unrolled float64 libdevice kernels.
+    # A single configuration also skips the autotuning benchmark sweep.
     return [
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 16}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 8}, num_warps=4, num_stages=2),
     ]
 
 
@@ -38,7 +37,8 @@ def _lse_bwd_dA_kernel(
     USE_EXP2: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    log2e = 1.4426950408889634
+    ACC_DTYPE: tl.constexpr = tl.float64 if A_ptr.dtype.element_ty == tl.float64 else tl.float32
+    log2e = tl.full((), 1.4426950408889634, ACC_DTYPE)
 
     pid_b = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
@@ -80,9 +80,9 @@ def _lse_bwd_dA_kernel(
         A_ptr + off_a + rm[:, None] * stride_am + rk[None, :] * stride_ak,
         mask=mask_m[:, None] & mask_k[None, :],
         other=0.0,
-    ).to(tl.float32)
+    ).to(ACC_DTYPE)
 
-    acc = tl.zeros((BLOCK_M, BLOCK_K), tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_K), ACC_DTYPE)
 
     for n0 in range(0, N, BLOCK_N):
         rn = n0 + tl.arange(0, BLOCK_N).to(tl.int64)
@@ -93,18 +93,18 @@ def _lse_bwd_dA_kernel(
             C_ptr + off_c + rm[:, None] * stride_cm + rn[None, :] * stride_cn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
         g_tile = tl.load(
             G_ptr + off_g + rm[:, None] * stride_gm + rn[None, :] * stride_gn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
 
         b_tile = tl.load(
             B_ptr + off_b + rk[:, None] * stride_bk + rn[None, :] * stride_bn,
             mask=mask_k[:, None] & mask_n[None, :],
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
 
         for kk in tl.static_range(0, BLOCK_K):
             ak = a_tile[:, kk]
@@ -113,9 +113,9 @@ def _lse_bwd_dA_kernel(
             logits = tl.where(mn_mask, logits, -float("inf"))
 
             if USE_EXP2:
-                p = tl.exp2(logits * log2e)
+                p = triton_math.exp2(logits * log2e)
             else:
-                p = tl.exp(logits)
+                p = triton_math.exp(logits)
 
             acc_k = tl.sum(g_tile * p, axis=1)
             acc = tl.multiple_of(acc, (1, 1))
@@ -156,7 +156,8 @@ def _lse_bwd_dA_kernel(
     USE_EXP2: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    log2e = 1.4426950408889634
+    ACC_DTYPE: tl.constexpr = tl.float64 if A_ptr.dtype.element_ty == tl.float64 else tl.float32
+    log2e = tl.full((), 1.4426950408889634, ACC_DTYPE)
 
     pid_b = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
@@ -192,7 +193,7 @@ def _lse_bwd_dA_kernel(
 
     mask_m = rm < M
 
-    acc = tl.zeros((BLOCK_M, BLOCK_K), tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_K), ACC_DTYPE)
 
     # loop over N blocks
     for n0 in range(0, N, BLOCK_N):
@@ -204,12 +205,12 @@ def _lse_bwd_dA_kernel(
             C_ptr + off_c + rm[:, None] * stride_cm + rn[None, :] * stride_cn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
         g_tile = tl.load(
             G_ptr + off_g + rm[:, None] * stride_gm + rn[None, :] * stride_gn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
 
         # loop over K within this block (no tensor indexing by constexpr)
         for kk in tl.static_range(0, BLOCK_K):
@@ -220,26 +221,26 @@ def _lse_bwd_dA_kernel(
                 A_ptr + off_a + rm * stride_am + k * stride_ak,
                 mask=mask_m & mk,
                 other=0.0,
-            ).to(tl.float32)  # (BM,)
+            ).to(ACC_DTYPE)  # (BM,)
 
             b_k = tl.load(
                 B_ptr + off_b + k * stride_bk + rn * stride_bn,
                 mask=mask_n & mk,
                 other=0.0,
-            ).to(tl.float32)  # (BN,)
+            ).to(ACC_DTYPE)  # (BN,)
 
             logits = a_k[:, None] + b_k[None, :] - c_tile
             logits = tl.where(mn_mask, logits, -float("inf"))
             logits = tl.minimum(logits, 0.0)  # hard guard against overflow
 
             if USE_EXP2:
-                p = tl.exp2(logits * log2e)
+                p = triton_math.exp2(logits * log2e)
             else:
-                p = tl.exp(logits)
+                p = triton_math.exp(logits)
 
             acc_k = tl.sum(g_tile * p, axis=1)  # (BM,)
 
-            one_hot = (tl.arange(0, BLOCK_K) == kk)[None, :].to(tl.float32)
+            one_hot = (tl.arange(0, BLOCK_K) == kk)[None, :].to(ACC_DTYPE)
             acc += acc_k[:, None] * one_hot
 
     rk = rk0 + tl.arange(0, BLOCK_K).to(tl.int64)
@@ -276,7 +277,8 @@ def _lse_bwd_dB_kernel(
     USE_EXP2: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    log2e = 1.4426950408889634
+    ACC_DTYPE: tl.constexpr = tl.float64 if A_ptr.dtype.element_ty == tl.float64 else tl.float32
+    log2e = tl.full((), 1.4426950408889634, ACC_DTYPE)
 
     pid_b = tl.program_id(0).to(tl.int64)
     pid_k = tl.program_id(1).to(tl.int64)
@@ -311,7 +313,7 @@ def _lse_bwd_dB_kernel(
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
 
     mask_n = rn < N
-    acc = tl.zeros((BLOCK_K, BLOCK_N), tl.float32)
+    acc = tl.zeros((BLOCK_K, BLOCK_N), ACC_DTYPE)
 
     # loop over M blocks
     for m0 in range(0, M, BLOCK_M):
@@ -323,12 +325,12 @@ def _lse_bwd_dB_kernel(
             C_ptr + off_c + rm[:, None] * stride_cm + rn[None, :] * stride_cn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
         g_tile = tl.load(
             G_ptr + off_g + rm[:, None] * stride_gm + rn[None, :] * stride_gn,
             mask=mn_mask,
             other=0.0,
-        ).to(tl.float32)
+        ).to(ACC_DTYPE)
 
         for kk in tl.static_range(0, BLOCK_K):
             k = rk0 + kk
@@ -338,25 +340,25 @@ def _lse_bwd_dB_kernel(
                 A_ptr + off_a + rm * stride_am + k * stride_ak,
                 mask=mask_m & mk,
                 other=0.0,
-            ).to(tl.float32)  # (BM,)
+            ).to(ACC_DTYPE)  # (BM,)
 
             b_k = tl.load(
                 B_ptr + off_b + k * stride_bk + rn * stride_bn,
                 mask=mask_n & mk,
                 other=0.0,
-            ).to(tl.float32)  # (BN,)
+            ).to(ACC_DTYPE)  # (BN,)
 
             logits = a_k[:, None] + b_k[None, :] - c_tile
             logits = tl.where(mn_mask, logits, -float("inf"))
             logits = tl.minimum(logits, 0.0)
 
             if USE_EXP2:
-                p = tl.exp2(logits * log2e)
+                p = triton_math.exp2(logits * log2e)
             else:
-                p = tl.exp(logits)
+                p = triton_math.exp(logits)
 
             acc_k = tl.sum(g_tile * p, axis=0)  # (BN,)
-            one_hot = (tl.arange(0, BLOCK_K) == kk)[:, None].to(tl.float32)
+            one_hot = (tl.arange(0, BLOCK_K) == kk)[:, None].to(ACC_DTYPE)
             acc += one_hot * acc_k[None, :]
 
     rk = rk0 + tl.arange(0, BLOCK_K).to(tl.int64)
