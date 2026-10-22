@@ -6,7 +6,7 @@ import torch
 from sklearn.decomposition import PCA
 
 from lightning import Trainer
-from lightning.pytorch.loggers import WandbLogger, CometLogger, CSVLogger
+from lightning.pytorch.loggers import CSVLogger
 from lightning.pytorch.utilities import rank_zero_only
 
 from catsbench import BenchmarkHD
@@ -153,22 +153,14 @@ class BenchmarkHDPlotterCallback(BasePlotterCallback):
         fig.tight_layout(pad=0.5)
         img = fig2img(fig)
         
-        if isinstance(pl_module.logger, WandbLogger):
-            pl_module.logger.log_image(
-                key=f'{stage}/samples_{fb}', images=[img], step=pl_module.global_step
-            )
-        elif isinstance(pl_module.logger, CometLogger):
-            pl_module.logger.experiment.log_image(
-                image_data=img, name=f'{stage}/samples_{fb}', step=pl_module.global_step
-            )
-        elif isinstance(pl_module.logger, CSVLogger):
+        if isinstance(pl_module.logger, CSVLogger):
             self._save_csv_image(
                 pl_module.logger, img, stage, "samples", fb,
                 pl_module.current_epoch, pl_module.global_step,
             )
         else:
             raise ValueError(
-                f'Unsupported logger type: {type(pl_module.logger)}. Expected WandbLogger, CometLogger or CSVLogger.'
+                f'Unsupported logger type: {type(pl_module.logger)}. Expected CSVLogger.'
             )
         plt.close()
 
@@ -275,21 +267,13 @@ class BenchmarkHDPlotterCallback(BasePlotterCallback):
         fig.tight_layout(pad=0.5)
         img = fig2img(fig)
         
-        if isinstance(pl_module.logger, WandbLogger):
-            pl_module.logger.log_image(
-                key=f'{stage}/trajectories_{fb}', images=[img], step=pl_module.global_step
-            )
-        elif isinstance(pl_module.logger, CometLogger):
-            pl_module.logger.experiment.log_image(
-                image_data=img, name=f'{stage}/trajectories_{fb}', step=pl_module.global_step
-            )
-        elif isinstance(pl_module.logger, CSVLogger):
+        if isinstance(pl_module.logger, CSVLogger):
             self._save_csv_image(
                 pl_module.logger, img, stage, "trajectories", fb,
                 pl_module.current_epoch, pl_module.global_step,
             )
         else:
             raise ValueError(
-                f'Unsupported logger type: {type(pl_module.logger)}. Expected WandbLogger, CometLogger or CSVLogger.'
+                f'Unsupported logger type: {type(pl_module.logger)}. Expected CSVLogger.'
             )
         plt.close()

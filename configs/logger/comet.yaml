@@ -1,6 +1,0 @@
-comet:
-  _target_: lightning.pytorch.loggers.comet.CometLogger
-  api_key: ${oc.env:COMET_API_TOKEN}
-  offline_directory: ${paths.output_dir}
-  project: dot-bench
-  name: ${hydra:runtime.choices.data}_${hydra:runtime.choices.method}_${prior.prior_type}_dim_${data.dim}_alpha_${prior.alpha}

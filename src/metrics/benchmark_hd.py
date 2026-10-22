@@ -14,7 +14,7 @@ from catsbench.metrics import (
 
 from .base import BaseMetricsCallback
 from ..data.batch import Batch
-from ..methods import BaseMethod, CSBM, AlphaCSBM
+from ..methods import BaseMethod
 from ..utils.ranked_logger import RankedLogger
 
 
@@ -201,9 +201,6 @@ class BenchmarkHDMetricsCallback(BaseMetricsCallback):
                 p=pred_transition_logits, 
                 q=self.benchmark.get_transition_logits(pred_trajectory, timesteps)
             )
-            if isinstance(pl_module, (CSBM, AlphaCSBM)):
-                timesteps = (pl_module.prior.num_timesteps + 1) - timesteps
-            
             with torch.no_grad(): # remove grads from transitions of DLightSB methods
                 self.forward_kl_div.update(
                     p=true_transition_logits, 

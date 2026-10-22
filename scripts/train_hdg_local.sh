@@ -11,4 +11,4 @@
 sleep $((SLURM_ARRAY_TASK_ID * 5))
 source activate dot_bench
 
-python scripts/train_hdg_local.py csbm --seed 5 --parallel 4
+python scripts/train_hdg_local.py dlight_sb --seed 5 --parallel 4
