@@ -64,6 +64,10 @@ class DLightSBMMRegularized(DLightSBMM):
         return strength * (_exponential_log_penalty(log_beta).sum()
                            + _exponential_log_penalty(log_r).sum())
 
+    def _enforce_monotonicity(self):
+        """Keep the guard for the exact regularized block minimizer."""
+        return self.hparams.regularization_lambda > 0
+
     def _update_block(
         self,
         log_a,

@@ -215,6 +215,9 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             places=12,
         )
 
+    def test_inexact_newton_does_not_enforce_monotonicity(self):
+        self.assertFalse(self._make_model()._enforce_monotonicity())
+
     def test_state_dict_stays_compatible_and_checkpoint_keeps_newton_state(self):
         model = self._make_model()
         self.assertFalse(any(key.startswith("simplex_") for key in model.state_dict()))

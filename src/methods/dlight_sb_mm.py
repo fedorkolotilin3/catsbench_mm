@@ -6,7 +6,7 @@ Usage:
     predictions = solver.sample(test_x)
 
 Lightning calls training_step: one batch is one complete MM update.
-The update is accepted only when it decreases the empirical loss of that batch.
+Finite Newton candidates are committed even when the inexact step is nonmonotone.
 With SampledCoupleDataset, successive steps may use fresh marginal samples.
 The original loss, prior and sampling methods are inherited unchanged.
 """
@@ -251,6 +251,10 @@ class DLightSBMM(DLightSB):
     def _regularization(self, log_beta, log_r):
         """Same penalty is added to the objective and its touching bound."""
         return log_beta.new_zeros(())
+
+    def _enforce_monotonicity(self):
+        """One inexact Newton correction is not an exact block minimizer."""
+        return False
 
     def on_train_start(self):
         if self.dtype not in (torch.float32, torch.float64):
@@ -515,13 +519,15 @@ class DLightSBMM(DLightSB):
         previous_loss = initial_loss.item()
         scale = max(1.0, abs(previous_loss), abs(bound_before))
         allowance = 64 * torch.finfo(self.dtype).eps * scale
-        if (
-            not math.isfinite(bound_after) or not math.isfinite(new_loss)
-            or bound_after > bound_before + allowance
+        nonfinite = not math.isfinite(bound_after) or not math.isfinite(new_loss)
+        nonmonotone = (
+            bound_after > bound_before + allowance
             or new_loss > previous_loss + allowance
-        ):
+        )
+        if nonfinite or (self._enforce_monotonicity() and nonmonotone):
+            failed_check = "finiteness" if nonfinite else "monotonicity"
             raise FloatingPointError(
-                f"MM step failed monotonicity: "
+                f"MM step failed {failed_check}: "
                 f"G {bound_before:.16g} -> {bound_after:.16g}, "
                 f"loss {previous_loss:.16g} -> {new_loss:.16g}; "
                 "no candidate weights committed"

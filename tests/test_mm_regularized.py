@@ -59,6 +59,7 @@ class RegularizedMMTest(unittest.TestCase):
     def test_zero_strength_matches_original_including_missing_categories(self):
         base = existing.DLightSBMMUpdateTest()._make_model()
         model = DLightSBMMRegularized.from_model(base, regularization_lambda=0.)
+        self.assertFalse(model._enforce_monotonicity())
         for _ in range(3):
             original = base.mm_step(*self.data())
             actual = model.mm_step(*self.data())
@@ -70,6 +71,7 @@ class RegularizedMMTest(unittest.TestCase):
         for dtype in (torch.float32, torch.float64):
             torch._dynamo.reset()
             model = self.make_model().to(dtype=dtype)
+            self.assertTrue(model._enforce_monotonicity())
             previous = model.log_cp_cores[:, 2].detach().clone()
             for _ in range(4):
                 info = model.mm_step(*self.data(), inner_sweeps=2)
