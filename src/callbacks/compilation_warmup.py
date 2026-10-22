@@ -10,8 +10,9 @@ class CompilationWarmup(Callback):
     """Warm up the real training path without changing training state.
 
     The first already-transferred training batch is executed repeatedly before
-    Lightning starts processing it. Model parameters, optimizer state and RNG
-    state are then restored, while compiled CUDA/Triton kernels remain cached.
+    Lightning starts processing it. Model parameters, buffers, optimizer state
+    and RNG state are then restored, while compiled CUDA/Triton kernels remain
+    cached.
     """
 
     def __init__(self, num_batches: int = 3) -> None:
@@ -42,6 +43,10 @@ class CompilationWarmup(Callback):
         saved_parameters = {
             name: parameter.detach().clone()
             for name, parameter in pl_module.named_parameters()
+        }
+        saved_buffers = {
+            name: buffer.detach().clone()
+            for name, buffer in pl_module.named_buffers()
         }
         saved_gradients = {
             name: (
@@ -79,6 +84,9 @@ class CompilationWarmup(Callback):
                         if saved_gradient is None
                         else saved_gradient.clone()
                     )
+
+                for name, buffer in pl_module.named_buffers():
+                    buffer.copy_(saved_buffers[name])
 
             optimizer.load_state_dict(saved_optimizer)
             torch.set_rng_state(saved_cpu_rng)

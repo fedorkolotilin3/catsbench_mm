@@ -16,6 +16,7 @@ class _WarmupModel(LightningModule):
     def __init__(self) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.register_buffer("simplex_lambda", torch.tensor(-0.25))
         self.warmup_calls = 0
         self.rng_before_warmup = None
         self.training_random = None
@@ -28,6 +29,7 @@ class _WarmupModel(LightningModule):
         optimizer.zero_grad(set_to_none=True)
         self.weight.square().backward()
         optimizer.step()
+        self.simplex_lambda.add_(1.0)
         torch.rand(1)
 
     def training_step(self, batch, batch_idx):
@@ -71,6 +73,7 @@ class CompilationWarmupTest(unittest.TestCase):
 
         self.assertEqual(model.warmup_calls, 3)
         self.assertAlmostEqual(model.weight.item(), 0.8, places=6)
+        self.assertEqual(model.simplex_lambda.item(), -0.25)
         final_rng = torch.get_rng_state()
         torch.set_rng_state(model.rng_before_warmup)
         expected_training_random = torch.rand(1)
