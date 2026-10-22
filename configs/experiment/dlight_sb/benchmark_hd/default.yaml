@@ -6,6 +6,7 @@ defaults:
   - override /method: dlight_sb
   - override /callbacks:
     - model_checkpoint
+    - periodic_checkpoint
     - model_summary
     - progress_bar
     - compilation_warmup
@@ -13,6 +14,11 @@ defaults:
     - benchmark_hd_metrics
   - override /trainer: gpu
   - _self_
+
+callbacks:
+  model_checkpoint:
+    every_n_epochs: 0
+    save_top_k: 0
 
 data:
   dim: ???

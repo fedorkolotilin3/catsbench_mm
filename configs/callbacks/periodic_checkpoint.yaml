@@ -1,0 +1,4 @@
+periodic_checkpoint:
+  _target_: src.callbacks.PeriodicCheckpoint
+  num_checkpoints: 20
+  subdir: history
