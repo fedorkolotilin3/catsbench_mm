@@ -21,3 +21,6 @@ checkpoints
 .pytest_cache
 .mypy_cache
 .ruff_cache
+/*_audit.json
+/*_verification.json
+/*_launch_check.json
