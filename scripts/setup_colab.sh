@@ -48,6 +48,7 @@ fi
 import hydra
 import lightning
 import ot
+import safetensors
 import torch
 
 print(f"torch={torch.__version__}")
