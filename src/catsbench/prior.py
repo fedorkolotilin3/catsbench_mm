@@ -148,7 +148,7 @@ class Prior(nn.Module):
             'uniform', 
             'gaussian',
         ] = 'uniform',
-        implementation: LSEImplementation = "normalized",
+        implementation: LSEImplementation = "triton",
         dtype: Union[str, torch.dtype] = torch.float64,
         device: Union[str, torch.device] = 'cpu'
     ) -> None:

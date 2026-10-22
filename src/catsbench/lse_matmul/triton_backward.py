@@ -6,10 +6,12 @@ from . import triton_math
 MAX_BATCH_DIMS = 6
 
 def _lse_bwd_autotune_configs() -> list[triton.Config]:
-    # One conservative tile avoids compiling large unrolled float64 libdevice kernels.
-    # A single configuration also skips the autotuning benchmark sweep.
     return [
-        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 8}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 16}, num_warps=8, num_stages=4),
     ]
 
 

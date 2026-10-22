@@ -168,6 +168,11 @@ def triton_lse_matmul(
     use_exp2: bool = True,
     eps: float = 0.0,
 ) -> torch.Tensor:
+    """Use float64 arithmetic if either input is double, otherwise float32.
+
+    The output and backward accumulators use this computation dtype. Autograd
+    returns each input's gradient in that input's original dtype.
+    """
     if a.shape[-1] != b.shape[-2]:
         raise ValueError(
             f"Inner dimension mismatch: {a.shape[-1]} != {b.shape[-2]}"
