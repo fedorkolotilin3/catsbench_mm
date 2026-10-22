@@ -2,7 +2,6 @@
 
 defaults:
   - override /data: benchmark_hd
-  - override /model: null
   - override /method: dlight_sb_m
   - override /callbacks:
     - model_checkpoint
@@ -43,7 +42,3 @@ trainer:
   val_check_interval: null
   accumulate_grad_batches: 1
   gradient_clip_val: null
-
-logger:
-  wandb:
-    project: catsbench

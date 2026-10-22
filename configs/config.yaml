@@ -1,14 +1,17 @@
 defaults:
-  - data: toy
+  - data: benchmark_hd
   - prior: default
-  - model: denoiser_mlp 
-  - method: csbm
+  - method: dlight_sb
   - workflow: fit
   - callbacks: 
+    - model_checkpoint
+    - periodic_checkpoint
     - model_summary
     - progress_bar
-    - toy_metrics
-  - logger: wandb
+    - compilation_warmup
+    - training_monitor
+    - benchmark_hd_metrics
+  - logger: csv_tensorboard
   - trainer: gpu
   - experiment: ???
   - hydra: default
