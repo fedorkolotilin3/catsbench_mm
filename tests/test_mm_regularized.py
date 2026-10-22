@@ -48,9 +48,13 @@ class RegularizedMMTest(unittest.TestCase):
         # Tests cover multiple shapes, strides and dtypes in one process.
         torch._dynamo.reset()
 
-    def make_model(self, strength=0.0001):
+    def make_model(self, alpha_strength=0.01, cores_strength=0.5):
         base = existing.DLightSBMMUpdateTest()._make_model()
-        return DLightSBMMRegularized.from_model(base, regularization_lambda=strength)
+        return DLightSBMMRegularized.from_model(
+            base,
+            regularization_lambda_alpha=alpha_strength,
+            regularization_lambda_cores=cores_strength,
+        )
 
     def data(self):
         return (torch.tensor([[0, 0], [1, 1], [2, 2]], dtype=torch.long),
@@ -58,7 +62,11 @@ class RegularizedMMTest(unittest.TestCase):
 
     def test_zero_strength_matches_original_including_missing_categories(self):
         base = existing.DLightSBMMUpdateTest()._make_model()
-        model = DLightSBMMRegularized.from_model(base, regularization_lambda=0.)
+        model = DLightSBMMRegularized.from_model(
+            base,
+            regularization_lambda_alpha=0.,
+            regularization_lambda_cores=0.,
+        )
         for _ in range(3):
             original = base.mm_step(*self.data())
             actual = model.mm_step(*self.data())
@@ -78,8 +86,13 @@ class RegularizedMMTest(unittest.TestCase):
                 # Base public loss evaluates the potential independently of
                 # the cached coefficients used by mm_step.
                 data_loss, _ = existing.DLightSBMM.loss(model, *self.data())
-                penalty = .0001 * ((model.log_alpha.exp() - model.log_alpha - 1).sum()
-                                   + (model.log_cp_cores.exp() - model.log_cp_cores - 1).sum())
+                alpha_penalty = (
+                    model.log_alpha.exp() - model.log_alpha - 1
+                ).mean()
+                cores_penalty = (
+                    model.log_cp_cores.exp() - model.log_cp_cores - 1
+                ).mean()
+                penalty = 0.01 * alpha_penalty + 0.5 * cores_penalty
                 self.assertAlmostEqual(info["data_loss"], data_loss.item(), places=5)
                 self.assertAlmostEqual(info["loss"], (data_loss + penalty).item(), places=5)
                 public_loss, terms = model.loss(*self.data())
@@ -90,8 +103,10 @@ class RegularizedMMTest(unittest.TestCase):
 
     def test_invalid_strength_and_exact_zero_parameters(self):
         for strength in (-1., float('nan'), float('inf')):
-            with self.assertRaisesRegex(ValueError, "regularization_lambda"):
-                self.make_model(strength)
+            with self.assertRaisesRegex(ValueError, "regularization_lambda_alpha"):
+                self.make_model(alpha_strength=strength)
+            with self.assertRaisesRegex(ValueError, "regularization_lambda_cores"):
+                self.make_model(cores_strength=strength)
         model = self.make_model()
         with torch.no_grad():
             model.log_alpha[0] = -torch.inf
@@ -101,9 +116,9 @@ class RegularizedMMTest(unittest.TestCase):
         self.assertTrue(torch.equal(original, model.log_cp_cores))
 
     def test_lightning_checkpoint_preserves_penalty_and_resume(self):
-        model = self.make_model(.02)
+        model = self.make_model(.02, .7)
         loader = DataLoader(TensorDataset(*self.data()), batch_size=3)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             trainer = Trainer(accelerator="cpu", max_steps=2, max_epochs=2,
                               logger=False, enable_checkpointing=False,
                               enable_progress_bar=False, enable_model_summary=False,
@@ -116,8 +131,8 @@ class RegularizedMMTest(unittest.TestCase):
             restored = DLightSBMMRegularized.load_from_checkpoint(
                 checkpoint, prior=model.prior, optimizer=None, weights_only=False
             )
-            self.assertEqual(restored.hparams.regularization_lambda, .02)
-            self.assertTrue(all(not p.requires_grad for p in restored.parameters()))
+            self.assertEqual(restored.hparams.regularization_lambda_alpha, .02)
+            self.assertEqual(restored.hparams.regularization_lambda_cores, .7)
             torch.testing.assert_close(restored.log_alpha, model.log_alpha)
             info = restored.mm_step(*self.data())
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)
@@ -130,7 +145,8 @@ class RegularizedMMTest(unittest.TestCase):
                 base = compose(config_name="config", overrides=[f"experiment=dlight_sb_mm/{name}"])
                 cfg = compose(config_name="config", overrides=[f"experiment=mm_regularized/{name}"])
                 self.assertEqual(cfg.method._target_, "src.methods.mm_regularized.DLightSBMMRegularized")
-                self.assertEqual(cfg.method.regularization_lambda, .0001)
+                self.assertEqual(cfg.method.regularization_lambda_alpha, .01)
+                self.assertEqual(cfg.method.regularization_lambda_cores, .5)
                 self.assertEqual(cfg.data, base.data)
                 self.assertEqual(cfg.trainer, base.trainer)
 

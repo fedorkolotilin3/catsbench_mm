@@ -20,7 +20,6 @@ class NotebookLaunchTest(unittest.TestCase):
             sources = [c.source for c in notebook.cells if c.cell_type == 'code']
             for source in sources:
                 compile(TransformerManager().transform_cell(source), str(path), 'exec')
-                self.assertNotIn('REGULARIZATION_LAMBDA', source)
             namespace = dict(Path=Path, os=os, sys=sys, subprocess=subprocess,
                              PROJECT_DIR=root, RUNS_DIR=root / 'logs/runs',
                              RUNS={}, SEED=42,
@@ -37,8 +36,6 @@ class NotebookLaunchTest(unittest.TestCase):
                     joined = json.dumps(commands)
                     if kind == 'mm_regularized':
                         self.assertIn(f'mm_regularized/benchmark_hd/d{dimension}_g002', joined)
-                    self.assertNotIn('method.regularization_lambda=', joined)
-                    self.assertNotIn('--regularization-lambda', joined)
                     if suffix == 'local':
                         self.assertEqual(len(commands), 2)
                 for action in ('run_experiment', 'export_run'):

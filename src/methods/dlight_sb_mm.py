@@ -21,6 +21,7 @@ except ImportError:  # resource is unavailable in native Windows Python
     resource = None
 
 import torch
+from catsbench.utils import lse_matmul
 
 from .dlight_sb import DLightSB
 
@@ -63,17 +64,14 @@ def _support_preserving_update_from_logs(
     return log_z
 
 
-@torch.compile(fullgraph=True)
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Compile the broadcast addition and library reduction together.
+    """Use the same LSE backend as baseline, prior and benchmark.
 
-    Keep inputs in log space, including exact zeros represented by -inf.
-    TorchInductor can fuse the expression without a full broadcast temporary.
-    Requires a working Inductor toolchain (Triton on CUDA or a C++ compiler
-    on CPU). The first call for a new specialization includes compilation.
+    CUDA uses the project's custom Triton kernel by default. CPU retains
+    the shared PyTorch reference fallback. MM never needs backward here.
     """
-    return torch.logsumexp(log_a.unsqueeze(-1) + log_b.unsqueeze(-3), dim=-2)
+    return lse_matmul(log_a, log_b)
 
 
 class _MMOptimizer(torch.optim.Optimizer):
@@ -114,8 +112,6 @@ class DLightSBMM(DLightSB):
         self.save_hyperparameters("inner_sweeps", "tol")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
-        # MM updates parameters analytically. Also keep inherited evaluation
-        # methods graph-free when called directly outside Lightning/no_grad.
         self.requires_grad_(False)
 
     @torch.no_grad()
@@ -125,7 +121,9 @@ class DLightSBMM(DLightSB):
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
-    def _update_block(self, log_a, log_b, current_log_z):
+    def _update_block(self, log_a, log_b, current_log_z, *, block):
+        if block not in {"alpha", "cores"}:
+            raise ValueError(f"Unknown MM parameter block: {block}")
         return _support_preserving_update_from_logs(log_a, log_b, current_log_z)
 
     def _regularization(self, log_beta, log_r):
@@ -325,7 +323,9 @@ class DLightSBMM(DLightSB):
             log_a = torch.logsumexp(
                 log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
             )
-            log_beta = self._update_block(log_a, log_n, log_beta)
+            log_beta = self._update_block(
+                log_a, log_n, log_beta, block="alpha"
+            )
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -343,7 +343,7 @@ class DLightSBMM(DLightSB):
                     log_q[d].T, log_coefficients
                 )  # [S,K]
                 log_r[d] = self._update_block(
-                    log_b_linear.T, log_m[d].T, log_r[d].T
+                    log_b_linear.T, log_m[d].T, log_r[d].T, block="cores"
                 ).T
                 log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])
 

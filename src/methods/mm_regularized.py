@@ -1,4 +1,4 @@
-"""Block-MM with a zero-centred exponential-linear penalty on log parameters.
+"""Block-MM with normalized exponential-linear penalties on log parameters.
 
 The E-step, block coefficients, sampling, Lightning integration and acceptance
 check are inherited from DLightSBMM. Only the penalty and scalar minimizer differ.
@@ -40,35 +40,62 @@ def _exponential_log_penalty(u):
 
 
 class DLightSBMMRegularized(DLightSBMM):
-    """Minimize data loss + lambda * sum(exp(u)-u-1) over all log parameters.
+    """Minimize data loss plus separate mean penalties for weights and cores.
 
-    The penalty is a sum, not a mean. Lambda=0 restores the original MM,
-    including support preservation for zero batch counts. For lambda>0 all
-    initial log parameters must be finite. Loss and stopping refer to the
+    ``regularization_lambda_alpha`` multiplies the mean penalty over mixture
+    weights. ``regularization_lambda_cores`` multiplies the mean penalty over
+    all categorical core parameters. Zero coefficients restore the original
+    MM update for the corresponding block. Loss and stopping refer to the
     regularized objective; data_loss and regularization are logged separately.
     """
 
-    def __init__(self, *args, regularization_lambda=0.0001, **kwargs):
-        if not math.isfinite(regularization_lambda) or regularization_lambda < 0:
-            raise ValueError("regularization_lambda must be finite and nonnegative")
+    def __init__(
+        self,
+        *args,
+        regularization_lambda_alpha=0.01,
+        regularization_lambda_cores=0.5,
+        **kwargs,
+    ):
+        coefficients = {
+            "regularization_lambda_alpha": regularization_lambda_alpha,
+            "regularization_lambda_cores": regularization_lambda_cores,
+        }
+        for name, value in coefficients.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
         super().__init__(*args, **kwargs)
-        self.save_hyperparameters("regularization_lambda")
+        self.save_hyperparameters(*coefficients)
 
     @torch.no_grad()
     def _regularization(self, log_beta, log_r):
-        strength = self.hparams.regularization_lambda
-        if strength == 0:
+        alpha_strength = self.hparams.regularization_lambda_alpha
+        cores_strength = self.hparams.regularization_lambda_cores
+        if alpha_strength == 0 and cores_strength == 0:
             return super()._regularization(log_beta, log_r)
         if not torch.isfinite(log_beta).all() or not torch.isfinite(log_r).all():
             raise ValueError("Log regularization requires strictly positive parameters")
-        return strength * (_exponential_log_penalty(log_beta).sum()
-                           + _exponential_log_penalty(log_r).sum())
+        return (alpha_strength * _exponential_log_penalty(log_beta).mean()
+                + cores_strength * _exponential_log_penalty(log_r).mean())
 
-    def _update_block(self, log_a, log_b, current_log_z):
-        if self.hparams.regularization_lambda == 0:
-            return super()._update_block(log_a, log_b, current_log_z)
+    def _update_block(self, log_a, log_b, current_log_z, *, block):
+        if block == "alpha":
+            strength = (
+                self.hparams.regularization_lambda_alpha
+                / self.log_alpha.numel()
+            )
+        elif block == "cores":
+            strength = (
+                self.hparams.regularization_lambda_cores
+                / self.log_cp_cores.numel()
+            )
+        else:
+            raise ValueError(f"Unknown MM parameter block: {block}")
+        if strength == 0:
+            return super()._update_block(
+                log_a, log_b, current_log_z, block=block
+            )
         return _exponential_log_update(
-            log_a, log_b, current_log_z, self.hparams.regularization_lambda
+            log_a, log_b, current_log_z, strength
         )
 
     @torch.no_grad()

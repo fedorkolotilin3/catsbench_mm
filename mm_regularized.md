@@ -7,19 +7,27 @@
 
 \[
 F(\theta)=\widehat{\mathcal L}(\theta)
-+\lambda\sum_{u\in\theta_{\log}}\left(e^u-u-1\right)
++\frac{\lambda_{\alpha}}{K}\sum_{k=1}^{K}\phi\left(\log\alpha_k\right)
++\frac{\lambda_r}{DSK}\sum_{d=1}^{D}\sum_{s=1}^{S}\sum_{k=1}^{K}\phi\left(\log r_{dsk}\right)
 \]
 
-Сумма берётся по всем элементам `log_alpha` и `log_cp_cores`
-`regularization_lambda` задаёт коэффициент перед суммой штрафов
-Нормировки на число параметров нет
-Значение `0.0001` задано в `configs/method/mm_regularized.yaml`
-Ноутбуки запуска используют конфиг без переопределения коэффициента
+\[
+\phi\left(u\right)=e^u-u-1
+\]
+
+`regularization_lambda_alpha` задаёт коэффициент среднего штрафа весов смеси
+
+`regularization_lambda_cores` задаёт коэффициент среднего штрафа ядер
+
+Значения по умолчанию равны `0.01` и `0.5`
+
+Нормировка делает масштаб каждого блока независимым от числа его параметров
+
 Оно не эквивалентно `weight_decay=0.01` в AdamW
 
 ## Обновление блока
 
-К прежнему мажоранту добавляется тот же штраф
+К прежнему мажоранту добавляется тот же нормированный штраф
 Для каждой координаты решается задача в логарифмической переменной
 
 \[
@@ -28,6 +36,18 @@ u=\log z
 
 \[
 \min_u\; ae^u-bu+\lambda\left(e^u-u-1\right)
+\]
+
+Для весов используется покоординатный коэффициент
+
+\[
+\lambda=\frac{\lambda_{\alpha}}{K}
+\]
+
+Для ядер используется покоординатный коэффициент
+
+\[
+\lambda=\frac{\lambda_r}{DSK}
 \]
 
 При положительном коэффициенте регуляризации минимум единственен
@@ -56,13 +76,12 @@ u_{\mathrm{new}}=\log(b+\lambda)-\log(a+\lambda)
 Гарантия относится к текущему батчу
 Отдельный нерегуляризованный loss может увеличиваться
 
-При `regularization_lambda=0` используется исходное обновление MM
-включая сохранение координат с нулевыми статистиками
+При нулевом коэффициенте соответствующий блок использует исходное обновление MM
 
 ## Запуск
 
 ```bash
-python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002
+python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002 method.regularization_lambda_alpha=0.01 method.regularization_lambda_cores=0.5
 ```
 
 Доступны также конфиги d2 и d64
@@ -87,7 +106,8 @@ from src.methods.mm_regularized import DLightSBMMRegularized
 
 solver = DLightSBMMRegularized.from_model(
     model,
-    regularization_lambda=0.0001,
+    regularization_lambda_alpha=0.01,
+    regularization_lambda_cores=0.5,
 )
 ```
 

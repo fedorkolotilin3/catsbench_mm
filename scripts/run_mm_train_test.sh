@@ -20,13 +20,18 @@ while [[ $# -gt 0 ]]; do
       EXPERIMENT="$2"
       shift 2
       ;;
-    --regularization-lambda)
-      [[ $# -ge 2 ]] || { echo "--regularization-lambda requires a coefficient" >&2; exit 2; }
-      EXTRA_OVERRIDES+=("method.regularization_lambda=$2")
+    --regularization-lambda-alpha)
+      [[ $# -ge 2 ]] || { echo "--regularization-lambda-alpha requires a coefficient" >&2; exit 2; }
+      EXTRA_OVERRIDES+=("method.regularization_lambda_alpha=$2")
+      shift 2
+      ;;
+    --regularization-lambda-cores)
+      [[ $# -ge 2 ]] || { echo "--regularization-lambda-cores requires a coefficient" >&2; exit 2; }
+      EXTRA_OVERRIDES+=("method.regularization_lambda_cores=$2")
       shift 2
       ;;
     -h|--help)
-      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT] [--regularization-lambda VALUE]"
+      echo "Usage: $0 [--device cpu|gpu] [--experiment HYDRA_EXPERIMENT] [--regularization-lambda-alpha VALUE] [--regularization-lambda-cores VALUE]"
       exit 0
       ;;
     *)
