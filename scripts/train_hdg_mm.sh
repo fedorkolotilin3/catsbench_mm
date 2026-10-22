@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# The final MM experiment uses the exact CPU backend and float64 arithmetic.
-export LSE_BACKEND=cpu
+# Share the custom CUDA kernel with baseline and benchmark evaluation.
+export LSE_BACKEND=triton
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 

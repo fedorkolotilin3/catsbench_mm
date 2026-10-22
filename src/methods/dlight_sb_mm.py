@@ -21,59 +21,93 @@ except ImportError:  # resource is unavailable in native Windows Python
     resource = None
 
 import torch
+from catsbench.utils import lse_matmul
 
 from .dlight_sb import DLightSB
 
 
+def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Minimize ``a*z - b*log(z)`` row-wise on the closed simplex."""
+    if a.shape != b.shape or a.ndim != 2:
+        raise ValueError("a and b must have the same two-dimensional shape")
+    if not torch.isfinite(a).all() or not torch.isfinite(b).all() or (b < 0).any():
+        raise ValueError("Expected finite coefficients and nonnegative counts")
+
+    positive = b > 0
+    has_counts = positive.any(dim=1, keepdim=True)
+    minimum = a.masked_fill(~positive, torch.inf).amin(dim=1, keepdim=True)
+    minimum = torch.where(has_counts, minimum, a.amin(dim=1, keepdim=True))
+    shifted = a - minimum
+
+    lower = b.masked_fill(shifted != 0, 0).sum(dim=1, keepdim=True)
+    upper = b.sum(dim=1, keepdim=True)
+    lo = torch.where(has_counts, lower, torch.ones_like(lower)).log()
+    hi = torch.where(has_counts, upper, torch.ones_like(upper)).log()
+    for _ in range(100):
+        log_mid = (lo + hi) / 2
+        delta = log_mid.exp()
+        denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
+        mass = (b / denominator).sum(dim=1, keepdim=True)
+        lo = torch.where(mass > 1, log_mid, lo)
+        hi = torch.where(mass > 1, hi, log_mid)
+
+    delta = ((lo + hi) / 2).exp()
+    minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
+    boundary_delta = minimum - minimum_zero
+    boundary = has_counts & (boundary_delta > delta)
+    delta = torch.where(boundary, boundary_delta, delta)
+    denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
+    z = b / denominator
+
+    interior = has_counts & ~boundary
+    mass = z.sum(dim=1, keepdim=True)
+    z = torch.where(interior, z / mass.clamp_min(torch.finfo(a.dtype).tiny), z)
+    zero_minima = ~positive & (a == minimum_zero)
+    residual = (1 - z.sum(dim=1, keepdim=True)).clamp_min(0)
+    z = z + torch.where(
+        boundary,
+        zero_minima * residual / zero_minima.sum(dim=1, keepdim=True).clamp_min(1),
+        torch.zeros_like(z),
+    )
+
+    minima = a == a.amin(dim=1, keepdim=True)
+    linear_solution = minima.to(a.dtype) / minima.sum(dim=1, keepdim=True)
+    z = torch.where(has_counts, z, linear_solution)
+    smallest = torch.nextafter(a.new_tensor(0.0), a.new_tensor(1.0))
+    return torch.where(z == 0, smallest, z)
+
+
 @torch.no_grad()
-def _support_preserving_update_from_logs(
-    log_a: torch.Tensor,
-    log_b: torch.Tensor,
-    current_log_z: torch.Tensor,
+def _simplex_minimum_from_logs(
+    log_a: torch.Tensor, log_b: torch.Tensor
 ) -> torch.Tensor:
-    """Apply a support-preserving MM update to ``a*z - b*log(z)``.
-
-    The explicit solution is ``z = b / a`` when both coefficients are
-    positive. Inputs and the result stay in the log domain. If ``b = 0``, the
-    current value is preserved instead of taking the boundary minimizer zero.
-    This leaves that coordinate's surrogate contribution unchanged and keeps
-    support for categories that may occur in later stochastic batches. If all
-    ``b`` coefficients in a block are zero, the complete block is therefore
-    left unchanged. The remaining case, ``a = 0 < b``, has no finite
-    minimizer.
-    """
-    if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
-        raise ValueError("log_a, log_b and current_log_z must have the same shape")
-    for value in (log_a, log_b, current_log_z):
+    """Solve the simplex block problem from log coefficients."""
+    if log_a.shape != log_b.shape or log_a.ndim != 2:
+        raise ValueError("log_a and log_b must have the same two-dimensional shape")
+    for value in (log_a, log_b):
         if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log parameters may contain finite values and -inf only")
+            raise ValueError("Log coefficients may contain finite values and -inf only")
 
-    positive_a = torch.isfinite(log_a)
-    positive_b = torch.isfinite(log_b)
-    if ((~positive_a) & positive_b).any():
-        raise FloatingPointError(
-            "The nonnegative MM block is unbounded: a=0 and b>0"
-        )
-
-    log_z = current_log_z.clone()
-    interior = positive_a & positive_b
-    log_z = torch.where(interior, log_b - log_a, log_z)
-    if torch.isnan(log_z).any() or torch.isposinf(log_z).any():
-        raise FloatingPointError("Non-finite support-preserving MM block update")
-    return log_z
+    shift = torch.maximum(
+        log_a.amax(dim=1, keepdim=True),
+        log_b.amax(dim=1, keepdim=True),
+    )
+    shift = torch.where(torch.isfinite(shift), shift, 0.0)
+    a = torch.exp(log_a - shift)
+    b = torch.exp(log_b - shift)
+    smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
+    b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
+    return _simplex_minimum(a, b)
 
 
-@torch.compile(fullgraph=True)
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Compile the broadcast addition and library reduction together.
+    """Use the same LSE backend as baseline, prior and benchmark.
 
-    Keep inputs in log space, including exact zeros represented by -inf.
-    TorchInductor can fuse the expression without a full broadcast temporary.
-    Requires a working Inductor toolchain (Triton on CUDA or a C++ compiler
-    on CPU). The first call for a new specialization includes compilation.
+    CUDA uses the project's custom Triton kernel by default. CPU retains
+    the shared PyTorch reference fallback. MM never needs backward here.
     """
-    return torch.logsumexp(log_a.unsqueeze(-1) + log_b.unsqueeze(-3), dim=-2)
+    return lse_matmul(log_a, log_b)
 
 
 class _MMOptimizer(torch.optim.Optimizer):
@@ -98,9 +132,8 @@ class DLightSBMM(DLightSB):
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Parameters are constrained only to be nonnegative; each block
-    uses the explicit minimizer ``z = b / a`` for positive sufficient
-    statistics and preserves coordinates with zero stochastic-batch counts.
+    statistics. The component weights and every categorical core are optimized
+    on closed simplexes. No explicit regularization is added.
     """
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
@@ -114,8 +147,6 @@ class DLightSBMM(DLightSB):
         self.save_hyperparameters("inner_sweeps", "tol")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
-        # MM updates parameters analytically. Also keep inherited evaluation
-        # methods graph-free when called directly outside Lightning/no_grad.
         self.requires_grad_(False)
 
     @torch.no_grad()
@@ -126,7 +157,13 @@ class DLightSBMM(DLightSB):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
     def _update_block(self, log_a, log_b, current_log_z):
-        return _support_preserving_update_from_logs(log_a, log_b, current_log_z)
+        del current_log_z
+        squeeze = log_a.ndim == 1
+        if squeeze:
+            log_a = log_a.unsqueeze(0)
+            log_b = log_b.unsqueeze(0)
+        result = _simplex_minimum_from_logs(log_a, log_b).log()
+        return result.squeeze(0) if squeeze else result
 
     def _regularization(self, log_beta, log_r):
         """Same penalty is added to the objective and its touching bound."""
@@ -254,13 +291,18 @@ class DLightSBMM(DLightSB):
         if not torch.isfinite(log_q).all():
             raise ValueError("MM requires a strictly positive finite reference transition")
 
-        # Work with the model's native nonnegative, unnormalized parameters.
-        # A value of -inf is an exact zero and is allowed by the MM domain.
+        # Return to the original simplex parameterization while preserving the
+        # represented potential through the compensating beta rescaling.
         log_r = self.log_cp_cores.detach().clone()
+        normalizers = torch.logsumexp(log_r, dim=1, keepdim=True)
+        log_r -= normalizers
         log_beta = self.log_alpha.detach().clone()
+        log_beta += normalizers.squeeze(1).sum(dim=0)
+        log_beta -= torch.logsumexp(log_beta, dim=0)
         invalid_log_r = torch.isnan(log_r).any() or torch.isposinf(log_r).any()
         invalid_log_beta = torch.isnan(log_beta).any() or torch.isposinf(log_beta).any()
-        if invalid_log_r or invalid_log_beta or not torch.isfinite(log_beta).any():
+        empty_core = ~torch.isfinite(log_r).any(dim=1).all()
+        if invalid_log_r or invalid_log_beta or empty_core or not torch.isfinite(log_beta).all():
             raise ValueError("Invalid initial potential parameters")
         log_u = torch.stack([
             _logsumexp_matmul(log_q[d], log_r[d]) for d in range(dim)

@@ -7,7 +7,7 @@ import test_dlight_sb_mm as existing
 from src.methods.dlight_sb import DLightSB
 from src.methods.dlight_sb_mm import (
     DLightSBMM, _MMOptimizer, _logsumexp_matmul,
-    _support_preserving_update_from_logs,
+    _simplex_minimum_from_logs,
 )
 from src.methods.mm_regularized import (
     DLightSBMMRegularized, _exponential_log_update, _exponential_log_penalty,
@@ -64,7 +64,7 @@ class MMNoGradTest(unittest.TestCase):
             b = torch.ones_like(a, requires_grad=True)
             results = [
                 _logsumexp_matmul(a, b),
-                _support_preserving_update_from_logs(a, b, a),
+                _simplex_minimum_from_logs(a, b),
                 _exponential_log_update(a, b, a, .01),
                 _exponential_log_penalty(b),
                 DLightSBMMRegularized.from_model(self.base)._regularization(a, b),
