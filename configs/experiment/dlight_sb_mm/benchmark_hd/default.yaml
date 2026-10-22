@@ -2,7 +2,6 @@
 
 defaults:
   - override /data: benchmark_hd
-  - override /model: null
   - override /method: dlight_sb_mm
   - override /callbacks:
     - model_checkpoint

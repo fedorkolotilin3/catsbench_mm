@@ -1,15 +1,8 @@
 import unittest
-import sys
 from types import SimpleNamespace
-from types import ModuleType
 from unittest.mock import Mock, patch
 
 import torch
-
-transformers = ModuleType("transformers")
-transformers.CLIPImageProcessor = Mock()
-transformers.CLIPVisionModelWithProjection = Mock()
-sys.modules.setdefault("transformers", transformers)
 
 from src.data.batch import Batch
 from src.metrics.benchmark_hd import BenchmarkHDMetricsCallback
