@@ -76,8 +76,6 @@ def _simplex_newton_step_from_logs(
     shifted = a - minimum
     lower_delta = b.masked_fill(shifted != 0, 0).sum(dim=1, keepdim=True)
     upper_delta = b.sum(dim=1, keepdim=True)
-    lower_lambda = lower_delta - minimum
-    upper_lambda = upper_delta - minimum
     initial_z = initial_log_z.exp()
     bootstrap_lambda = b.sum(dim=1, keepdim=True) - (a * initial_z).sum(
         dim=1,
@@ -85,25 +83,30 @@ def _simplex_newton_step_from_logs(
     )
 
     lambda_start = torch.where(initialized, previous_lambda, bootstrap_lambda)
-    lambda_start = torch.maximum(
-        torch.minimum(lambda_start, upper_lambda),
-        lower_lambda,
+    # Work with delta = lambda + min(a). Forming lambda near -min(a) and
+    # adding min(a) back can erase a tiny positive delta in float32, making
+    # an active denominator exactly zero. The shifted coordinate avoids that
+    # cancellation while describing the identical Newton equation.
+    delta_start = torch.maximum(
+        torch.minimum(lambda_start + minimum, upper_delta),
+        lower_delta,
     )
-    denominator = torch.where(positive, a + lambda_start, torch.ones_like(a))
+    denominator = torch.where(positive, shifted + delta_start, torch.ones_like(a))
     mass = (b / denominator).sum(dim=1, keepdim=True)
     curvature = (b / denominator.square()).sum(dim=1, keepdim=True)
     correction = torch.where(has_counts, (mass - 1) / curvature, 0.0)
-    lambda_new = lambda_start + correction
-    lambda_new = torch.maximum(
-        torch.minimum(lambda_new, upper_lambda),
-        lower_lambda,
+    delta_new = delta_start + correction
+    delta_new = torch.maximum(
+        torch.minimum(delta_new, upper_delta),
+        lower_delta,
     )
 
     minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
-    boundary_lambda = -minimum_zero
-    boundary = has_counts & (boundary_lambda > lambda_new)
-    lambda_new = torch.where(boundary, boundary_lambda, lambda_new)
-    denominator = torch.where(positive, a + lambda_new, torch.ones_like(a))
+    boundary_delta = minimum - minimum_zero
+    boundary = has_counts & (boundary_delta > delta_new)
+    delta_new = torch.where(boundary, boundary_delta, delta_new)
+    lambda_new = delta_new - minimum
+    denominator = torch.where(positive, shifted + delta_new, torch.ones_like(a))
     z = b / denominator
     zero_minima = ~positive & (a == minimum_zero)
     residual_mass = (1 - z.sum(dim=1, keepdim=True)).clamp_min(0)

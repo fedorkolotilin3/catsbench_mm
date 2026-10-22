@@ -124,6 +124,26 @@ class SimplexNewtonStepTest(unittest.TestCase):
 
         torch.testing.assert_close(result["lambda"], expected_lambda)
 
+    def test_float32_tiny_counts_do_not_cancel_active_denominator(self):
+        a = torch.ones((1, 2), dtype=torch.float32)
+        smallest = torch.nextafter(a.new_tensor(0.0), a.new_tensor(1.0))
+        b = torch.full_like(a, smallest)
+        initial_z = torch.full_like(a, 0.5)
+
+        result = self._step(
+            a,
+            b,
+            initial_z,
+            torch.zeros((1, 1), dtype=a.dtype),
+            initialized=False,
+        )
+
+        self.assertTrue(torch.isfinite(result["log_z"]).all())
+        torch.testing.assert_close(
+            result["log_z"].exp().sum(dim=1),
+            torch.ones(1, dtype=a.dtype),
+        )
+
 
 class DLightSBMMUpdateTest(unittest.TestCase):
     def _make_model(self) -> DLightSBMM:
