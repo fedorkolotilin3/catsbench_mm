@@ -40,7 +40,6 @@ dependencies = [
     "matplotlib>=3.5.0",
     "numpy>=1.22.0",
     "torch>=2.0.0", # for triton
-    "torchvision>=0.15.1",
     "torchmetrics>=0.7.0",
 ]
 

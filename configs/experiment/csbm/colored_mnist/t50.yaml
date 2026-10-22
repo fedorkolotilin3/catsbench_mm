@@ -1,9 +1,0 @@
-# @package _global_
-
-defaults:
-  - csbm/colored_mnist/default
-  - _self_
-
-prior:
-  num_timesteps: 50
-  num_skip_steps: 2
