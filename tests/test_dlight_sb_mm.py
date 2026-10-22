@@ -195,19 +195,30 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             places=12,
         )
 
-    def test_old_checkpoint_loads_with_uninitialized_newton_state(self):
+    def test_state_dict_stays_compatible_and_checkpoint_keeps_newton_state(self):
         model = self._make_model()
-        old_state = {
-            key: value
-            for key, value in model.state_dict().items()
-            if not key.startswith("simplex_")
-        }
+        self.assertFalse(any(key.startswith("simplex_") for key in model.state_dict()))
+        model.simplex_beta_lambda.fill_(0.25)
+        model.simplex_beta_initialized.fill_(True)
+        model.simplex_core_lambda.fill_(-0.125)
+        model.simplex_core_initialized.fill_(True)
+        checkpoint = {"state_dict": model.state_dict()}
+        model.on_save_checkpoint(checkpoint)
         restored = self._make_model()
 
-        restored.load_state_dict(old_state)
+        restored.load_state_dict(checkpoint["state_dict"])
+        restored.on_load_checkpoint(checkpoint)
 
-        self.assertFalse(restored.simplex_beta_initialized.any())
-        self.assertFalse(restored.simplex_core_initialized.any())
+        torch.testing.assert_close(
+            restored.simplex_beta_lambda,
+            model.simplex_beta_lambda,
+        )
+        torch.testing.assert_close(
+            restored.simplex_core_lambda,
+            model.simplex_core_lambda,
+        )
+        self.assertTrue(restored.simplex_beta_initialized.all())
+        self.assertTrue(restored.simplex_core_initialized.all())
 
     def test_unobserved_target_category_preserves_support(self):
         torch.manual_seed(0)

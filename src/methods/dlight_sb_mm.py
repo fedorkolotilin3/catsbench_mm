@@ -40,7 +40,11 @@ def _simplex_newton_step_from_logs(
     multiplier uses this dimensionless coordinate system, which is invariant
     to a common rescaling of all coefficients in a row.
     """
-    if log_a.shape != log_b.shape or log_a.shape != initial_log_z.shape or log_a.ndim != 2:
+    if (
+        log_a.shape != log_b.shape
+        or log_a.shape != initial_log_z.shape
+        or log_a.ndim != 2
+    ):
         raise ValueError("log_a, log_b and initial_log_z must have the same 2D shape")
     expected_state_shape = (log_a.shape[0], 1)
     for name, value in (
@@ -81,13 +85,19 @@ def _simplex_newton_step_from_logs(
     )
 
     lambda_start = torch.where(initialized, previous_lambda, bootstrap_lambda)
-    lambda_start = torch.maximum(torch.minimum(lambda_start, upper_lambda), lower_lambda)
+    lambda_start = torch.maximum(
+        torch.minimum(lambda_start, upper_lambda),
+        lower_lambda,
+    )
     denominator = torch.where(positive, a + lambda_start, torch.ones_like(a))
     mass = (b / denominator).sum(dim=1, keepdim=True)
     curvature = (b / denominator.square()).sum(dim=1, keepdim=True)
     correction = torch.where(has_counts, (mass - 1) / curvature, 0.0)
     lambda_new = lambda_start + correction
-    lambda_new = torch.maximum(torch.minimum(lambda_new, upper_lambda), lower_lambda)
+    lambda_new = torch.maximum(
+        torch.minimum(lambda_new, upper_lambda),
+        lower_lambda,
+    )
 
     minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
     boundary_lambda = -minimum_zero
