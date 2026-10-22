@@ -64,12 +64,33 @@ class DLightSBMMRegularized(DLightSBMM):
         return strength * (_exponential_log_penalty(log_beta).sum()
                            + _exponential_log_penalty(log_r).sum())
 
-    def _update_block(self, log_a, log_b, current_log_z):
+    def _update_block(
+        self,
+        log_a,
+        log_b,
+        current_log_z,
+        previous_lambda,
+        initialized,
+    ):
         if self.hparams.regularization_lambda == 0:
-            return super()._update_block(log_a, log_b, current_log_z)
-        return _exponential_log_update(
+            return super()._update_block(
+                log_a,
+                log_b,
+                current_log_z,
+                previous_lambda,
+                initialized,
+            )
+        log_z = _exponential_log_update(
             log_a, log_b, current_log_z, self.hparams.regularization_lambda
         )
+        squeeze = log_z.ndim == 1
+        rows = log_z.unsqueeze(0) if squeeze else log_z
+        return {
+            "log_z": log_z,
+            "lambda": previous_lambda,
+            "simplex_residual": (rows.exp().sum(dim=1, keepdim=True) - 1).abs(),
+            "newton_correction": previous_lambda.new_zeros(previous_lambda.shape),
+        }
 
     @torch.no_grad()
     def loss(self, true_x_start, true_x_end):

@@ -6,8 +6,7 @@ from src.data.prior import Prior
 from src.methods.dlight_sb_mm import (
     DLightSBMM,
     _logsumexp_matmul,
-    _simplex_minimum,
-    _simplex_minimum_from_logs,
+    _simplex_newton_step_from_logs,
 )
 
 
@@ -44,33 +43,86 @@ class CompiledLogsumexpTest(unittest.TestCase):
                 torch.testing.assert_close(actual, expected)
 
 
-class SimplexBlockMinimumTest(unittest.TestCase):
-    def test_positive_counts_form_a_simplex(self):
+class SimplexNewtonStepTest(unittest.TestCase):
+    def _step(self, a, b, z, previous_lambda, initialized=True):
+        return _simplex_newton_step_from_logs(
+            a.log(),
+            b.log(),
+            z.log(),
+            previous_lambda,
+            torch.full_like(previous_lambda, initialized, dtype=torch.bool),
+        )
+
+    def test_fixed_point_matches_closed_form_kkt_solution(self):
         a = torch.tensor([[2.0, 3.0, 1.0]], dtype=torch.float64)
-        b = torch.tensor([[8.0, 2.0, 1.0]], dtype=torch.float64)
+        expected_z = torch.tensor([[0.2, 0.3, 0.5]], dtype=torch.float64)
+        physical_lambda = 2.0
+        b = expected_z * (a + physical_lambda)
+        scale = torch.maximum(a.amax(dim=1, keepdim=True), b.amax(dim=1, keepdim=True))
+        scaled_lambda = torch.full((1, 1), physical_lambda, dtype=a.dtype) / scale
 
-        result = _simplex_minimum(a, b)
+        result = self._step(a, b, expected_z, scaled_lambda)
 
-        torch.testing.assert_close(result.sum(dim=1), torch.ones(1, dtype=result.dtype))
-        self.assertTrue((result > 0).all())
+        torch.testing.assert_close(result["log_z"].exp(), expected_z)
+        torch.testing.assert_close(result["newton_correction"], torch.zeros_like(scaled_lambda))
 
-    def test_no_counts_selects_smallest_linear_coefficient(self):
-        a = torch.tensor([[2.0, 1.0, 1.0]], dtype=torch.float64)
-        b = torch.zeros_like(a)
+    def test_one_step_is_the_explicit_newton_formula(self):
+        a = torch.tensor([[0.4, 0.8, 1.0]], dtype=torch.float64)
+        b = torch.tensor([[0.2, 0.3, 0.4]], dtype=torch.float64)
+        initial_z = torch.full_like(a, 1 / 3)
+        lambda_old = torch.tensor([[0.2]], dtype=a.dtype)
+        mass = (b / (a + lambda_old)).sum(dim=1, keepdim=True)
+        curvature = (b / (a + lambda_old).square()).sum(dim=1, keepdim=True)
+        expected_lambda = lambda_old + (mass - 1) / curvature
 
-        result = _simplex_minimum(a, b)
+        result = self._step(a, b, initial_z, lambda_old)
 
-        self.assertGreater(result[0, 0].item(), 0.0)
-        torch.testing.assert_close(result[0, 1:], torch.tensor([0.5, 0.5], dtype=a.dtype))
+        torch.testing.assert_close(result["lambda"], expected_lambda)
+        torch.testing.assert_close(
+            result["log_z"].exp(),
+            b / (a + expected_lambda),
+        )
 
-    def test_log_domain_solver_matches_direct_solver(self):
-        a = torch.tensor([[2.0, 3.0, 1.0]], dtype=torch.float64)
-        b = torch.tensor([[8.0, 2.0, 1.0]], dtype=torch.float64)
+    def test_common_coefficient_scale_does_not_change_update(self):
+        a = torch.tensor([[0.4, 0.8, 1.0]], dtype=torch.float64)
+        b = torch.tensor([[0.2, 0.3, 0.4]], dtype=torch.float64)
+        initial_z = torch.full_like(a, 1 / 3)
+        previous_lambda = torch.tensor([[0.2]], dtype=a.dtype)
 
-        expected = _simplex_minimum(a, b)
-        actual = _simplex_minimum_from_logs(a.log(), b.log())
+        reference = self._step(a, b, initial_z, previous_lambda)
+        scaled = _simplex_newton_step_from_logs(
+            a.log() + 100,
+            b.log() + 100,
+            initial_z.log(),
+            previous_lambda,
+            torch.ones_like(previous_lambda, dtype=torch.bool),
+        )
 
-        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(scaled["lambda"], reference["lambda"])
+        torch.testing.assert_close(scaled["log_z"], reference["log_z"])
+
+    def test_bootstrap_lambda_is_derived_from_current_z(self):
+        a = torch.tensor([[0.4, 0.8, 1.0]], dtype=torch.float64)
+        b = torch.tensor([[0.2, 0.3, 0.4]], dtype=torch.float64)
+        initial_z = torch.full_like(a, 1 / 3)
+        ignored_lambda = torch.tensor([[123.0]], dtype=a.dtype)
+        bootstrap = b.sum(dim=1, keepdim=True) - (a * initial_z).sum(
+            dim=1,
+            keepdim=True,
+        )
+        mass = (b / (a + bootstrap)).sum(dim=1, keepdim=True)
+        curvature = (b / (a + bootstrap).square()).sum(dim=1, keepdim=True)
+        expected_lambda = bootstrap + (mass - 1) / curvature
+
+        result = self._step(
+            a,
+            b,
+            initial_z,
+            ignored_lambda,
+            initialized=False,
+        )
+
+        torch.testing.assert_close(result["lambda"], expected_lambda)
 
 
 class DLightSBMMUpdateTest(unittest.TestCase):
@@ -101,7 +153,7 @@ class DLightSBMMUpdateTest(unittest.TestCase):
         model.init_weights()
         return model
 
-    def test_mm_step_is_monotone_on_simplexes(self):
+    def test_mm_step_is_monotone_and_reports_simplex_residual(self):
         torch.manual_seed(0)
         model = self._make_model()
         with torch.no_grad():
@@ -124,16 +176,38 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             info = model.mm_step(x0, x1)
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)
             self.assertGreaterEqual(info["surrogate_decrease"], -1e-10)
+            self.assertIn("simplex_beta_residual", info)
+            self.assertIn("simplex_core_residual_max", info)
+            self.assertIn("simplex_newton_correction_max", info)
 
         self.assertFalse(torch.isnan(model.log_alpha).any())
         self.assertFalse(torch.isposinf(model.log_alpha).any())
-        torch.testing.assert_close(
-            model.log_alpha.exp().sum(), model.log_alpha.new_tensor(1.0)
+        self.assertTrue(model.simplex_beta_initialized.all())
+        self.assertTrue(model.simplex_core_initialized.all())
+        self.assertAlmostEqual(
+            abs(model.log_alpha.exp().sum().item() - 1),
+            info["simplex_beta_residual"],
+            places=12,
         )
-        torch.testing.assert_close(
-            model.log_cp_cores.exp().sum(dim=1),
-            torch.ones_like(model.log_cp_cores[:, 0]),
+        self.assertAlmostEqual(
+            (model.log_cp_cores.exp().sum(dim=1) - 1).abs().amax().item(),
+            info["simplex_core_residual_max"],
+            places=12,
         )
+
+    def test_old_checkpoint_loads_with_uninitialized_newton_state(self):
+        model = self._make_model()
+        old_state = {
+            key: value
+            for key, value in model.state_dict().items()
+            if not key.startswith("simplex_")
+        }
+        restored = self._make_model()
+
+        restored.load_state_dict(old_state)
+
+        self.assertFalse(restored.simplex_beta_initialized.any())
+        self.assertFalse(restored.simplex_core_initialized.any())
 
     def test_unobserved_target_category_preserves_support(self):
         torch.manual_seed(0)

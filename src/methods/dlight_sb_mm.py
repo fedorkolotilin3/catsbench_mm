@@ -6,7 +6,7 @@ Usage:
     predictions = solver.sample(test_x)
 
 Lightning calls training_step: one batch is one complete MM update.
-The update monotonically decreases the empirical loss of that current batch.
+The update is accepted only when it decreases the empirical loss of that batch.
 With SampledCoupleDataset, successive steps may use fresh marginal samples.
 The original loss, prior and sampling methods are inherited unchanged.
 """
@@ -26,10 +26,42 @@ from catsbench.utils import lse_matmul
 from .dlight_sb import DLightSB
 
 
-def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Minimize ``a*z - b*log(z)`` row-wise on the closed simplex."""
-    if a.shape != b.shape or a.ndim != 2:
-        raise ValueError("a and b must have the same two-dimensional shape")
+@torch.no_grad()
+def _simplex_newton_step_from_logs(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    initial_log_z: torch.Tensor,
+    previous_lambda: torch.Tensor,
+    initialized: torch.Tensor,
+):
+    """Take one safeguarded Newton step for each simplex multiplier.
+
+    Coefficients are rescaled row-wise for numerical stability. The stored
+    multiplier uses this dimensionless coordinate system, which is invariant
+    to a common rescaling of all coefficients in a row.
+    """
+    if log_a.shape != log_b.shape or log_a.shape != initial_log_z.shape or log_a.ndim != 2:
+        raise ValueError("log_a, log_b and initial_log_z must have the same 2D shape")
+    expected_state_shape = (log_a.shape[0], 1)
+    for name, value in (
+        ("previous_lambda", previous_lambda),
+        ("initialized", initialized),
+    ):
+        if value.shape != expected_state_shape:
+            raise ValueError(f"{name} must have shape {expected_state_shape}")
+    for value in (log_a, log_b):
+        if torch.isnan(value).any() or torch.isposinf(value).any():
+            raise ValueError("Log coefficients may contain finite values and -inf only")
+
+    log_scale = torch.maximum(
+        log_a.amax(dim=1, keepdim=True),
+        log_b.amax(dim=1, keepdim=True),
+    )
+    log_scale = torch.where(torch.isfinite(log_scale), log_scale, 0.0)
+    a = torch.exp(log_a - log_scale)
+    b = torch.exp(log_b - log_scale)
+    smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
+    b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
     if not torch.isfinite(a).all() or not torch.isfinite(b).all() or (b < 0).any():
         raise ValueError("Expected finite coefficients and nonnegative counts")
 
@@ -38,77 +70,55 @@ def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     minimum = a.masked_fill(~positive, torch.inf).amin(dim=1, keepdim=True)
     minimum = torch.where(has_counts, minimum, a.amin(dim=1, keepdim=True))
     shifted = a - minimum
-
-    lower = b.masked_fill(shifted != 0, 0).sum(dim=1, keepdim=True)
-    upper = b.sum(dim=1, keepdim=True)
-    lo = torch.where(has_counts, lower, torch.ones_like(lower)).log()
-    hi = torch.where(has_counts, upper, torch.ones_like(upper)).log()
-    for _ in range(100):
-        log_mid = (lo + hi) / 2
-        delta = log_mid.exp()
-        denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
-        mass = (b / denominator).sum(dim=1, keepdim=True)
-        lo = torch.where(mass > 1, log_mid, lo)
-        hi = torch.where(mass > 1, hi, log_mid)
-
-    delta = ((lo + hi) / 2).exp()
-    minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
-    boundary_delta = minimum - minimum_zero
-    boundary = has_counts & (boundary_delta > delta)
-    delta = torch.where(boundary, boundary_delta, delta)
-    denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
-    z = b / denominator
-
-    interior = has_counts & ~boundary
-    mass = z.sum(dim=1, keepdim=True)
-    z = torch.where(interior, z / mass.clamp_min(torch.finfo(a.dtype).tiny), z)
-    zero_minima = ~positive & (a == minimum_zero)
-    residual = (1 - z.sum(dim=1, keepdim=True)).clamp_min(0)
-    z = z + torch.where(
-        boundary,
-        zero_minima * residual / zero_minima.sum(dim=1, keepdim=True).clamp_min(1),
-        torch.zeros_like(z),
+    lower_delta = b.masked_fill(shifted != 0, 0).sum(dim=1, keepdim=True)
+    upper_delta = b.sum(dim=1, keepdim=True)
+    lower_lambda = lower_delta - minimum
+    upper_lambda = upper_delta - minimum
+    initial_z = initial_log_z.exp()
+    bootstrap_lambda = b.sum(dim=1, keepdim=True) - (a * initial_z).sum(
+        dim=1,
+        keepdim=True,
     )
 
+    lambda_start = torch.where(initialized, previous_lambda, bootstrap_lambda)
+    lambda_start = torch.maximum(torch.minimum(lambda_start, upper_lambda), lower_lambda)
+    denominator = torch.where(positive, a + lambda_start, torch.ones_like(a))
+    mass = (b / denominator).sum(dim=1, keepdim=True)
+    curvature = (b / denominator.square()).sum(dim=1, keepdim=True)
+    correction = torch.where(has_counts, (mass - 1) / curvature, 0.0)
+    lambda_new = lambda_start + correction
+    lambda_new = torch.maximum(torch.minimum(lambda_new, upper_lambda), lower_lambda)
+
+    minimum_zero = a.masked_fill(positive, torch.inf).amin(dim=1, keepdim=True)
+    boundary_lambda = -minimum_zero
+    boundary = has_counts & (boundary_lambda > lambda_new)
+    lambda_new = torch.where(boundary, boundary_lambda, lambda_new)
+    denominator = torch.where(positive, a + lambda_new, torch.ones_like(a))
+    z = b / denominator
+    zero_minima = ~positive & (a == minimum_zero)
+    residual_mass = (1 - z.sum(dim=1, keepdim=True)).clamp_min(0)
+    z = z + torch.where(
+        boundary,
+        zero_minima * residual_mass / zero_minima.sum(dim=1, keepdim=True).clamp_min(1),
+        torch.zeros_like(z),
+    )
     minima = a == a.amin(dim=1, keepdim=True)
     linear_solution = minima.to(a.dtype) / minima.sum(dim=1, keepdim=True)
     z = torch.where(has_counts, z, linear_solution)
-    smallest = torch.nextafter(a.new_tensor(0.0), a.new_tensor(1.0))
-    return torch.where(z == 0, smallest, z)
+    z = torch.where(z == 0, smallest, z)
 
-
-@torch.no_grad()
-def _simplex_minimum_from_logs(
-    log_a: torch.Tensor, log_b: torch.Tensor
-) -> torch.Tensor:
-    """Solve the simplex block problem from log coefficients."""
-    if log_a.shape != log_b.shape or log_a.ndim != 2:
-        raise ValueError("log_a and log_b must have the same two-dimensional shape")
-    for value in (log_a, log_b):
-        if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log coefficients may contain finite values and -inf only")
-
-    shift = torch.maximum(
-        log_a.amax(dim=1, keepdim=True),
-        log_b.amax(dim=1, keepdim=True),
-    )
-    shift = torch.where(torch.isfinite(shift), shift, 0.0)
-    a = torch.exp(log_a - shift)
-    b = torch.exp(log_b - shift)
-    smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
-    b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
-    return _simplex_minimum(a, b)
+    return {
+        "log_z": z.log(),
+        "lambda": lambda_new,
+        "simplex_residual": (z.sum(dim=1, keepdim=True) - 1).abs(),
+        "newton_correction": correction.abs(),
+    }
 
 
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Use the same LSE backend as baseline, prior and benchmark.
-
-    CUDA uses the project's custom Triton kernel by default. CPU retains
-    the shared PyTorch reference fallback. MM never needs backward here.
-    """
-    return lse_matmul(log_a, log_b)
-
+    """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
+    return lse_matmul(log_a, log_b, implementation="triton")
 
 class _MMOptimizer(torch.optim.Optimizer):
     """Execute an analytic update through Lightning's optimizer bookkeeping.
@@ -128,12 +138,12 @@ class _MMOptimizer(torch.optim.Optimizer):
 
 
 class DLightSBMM(DLightSB):
-    """DLightSB with one analytic block-MM sweep per Lightning training_step.
+    """DLightSB with one inexact block-MM sweep per Lightning training_step.
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. The component weights and every categorical core are optimized
-    on closed simplexes. No explicit regularization is added.
+    statistics. Each simplex multiplier gets one safeguarded Newton correction
+    warm-started from the preceding MM step. No explicit regularization is added.
     """
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
@@ -148,6 +158,32 @@ class DLightSBMM(DLightSB):
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
         self.requires_grad_(False)
+        _, _, components = self.log_cp_cores.shape
+        state_options = {"device": self.device, "dtype": self.dtype}
+        self.register_buffer(
+            "simplex_beta_lambda",
+            torch.zeros((1, 1), **state_options),
+            persistent=False,
+        )
+        self.register_buffer(
+            "simplex_beta_initialized",
+            torch.zeros((1, 1), device=self.device, dtype=torch.bool),
+            persistent=False,
+        )
+        self.register_buffer(
+            "simplex_core_lambda",
+            torch.zeros((self.hparams.dim, components, 1), **state_options),
+            persistent=False,
+        )
+        self.register_buffer(
+            "simplex_core_initialized",
+            torch.zeros(
+                (self.hparams.dim, components, 1),
+                device=self.device,
+                dtype=torch.bool,
+            ),
+            persistent=False,
+        )
 
     @torch.no_grad()
     def loss(self, true_x_start, true_x_end):
@@ -156,14 +192,48 @@ class DLightSBMM(DLightSB):
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
-    def _update_block(self, log_a, log_b, current_log_z):
-        del current_log_z
+    def _update_block(
+        self,
+        log_a,
+        log_b,
+        current_log_z,
+        previous_lambda,
+        initialized,
+    ):
         squeeze = log_a.ndim == 1
         if squeeze:
             log_a = log_a.unsqueeze(0)
             log_b = log_b.unsqueeze(0)
-        result = _simplex_minimum_from_logs(log_a, log_b).log()
-        return result.squeeze(0) if squeeze else result
+            current_log_z = current_log_z.unsqueeze(0)
+        result = _simplex_newton_step_from_logs(
+            log_a,
+            log_b,
+            current_log_z,
+            previous_lambda,
+            initialized,
+        )
+        if squeeze:
+            result["log_z"] = result["log_z"].squeeze(0)
+        return result
+
+    def on_save_checkpoint(self, checkpoint):
+        super().on_save_checkpoint(checkpoint)
+        checkpoint["simplex_newton_state"] = {
+            "beta_lambda": self.simplex_beta_lambda.detach().clone(),
+            "beta_initialized": self.simplex_beta_initialized.detach().clone(),
+            "core_lambda": self.simplex_core_lambda.detach().clone(),
+            "core_initialized": self.simplex_core_initialized.detach().clone(),
+        }
+
+    def on_load_checkpoint(self, checkpoint):
+        super().on_load_checkpoint(checkpoint)
+        state = checkpoint.get("simplex_newton_state")
+        if state is None:
+            return
+        self.simplex_beta_lambda.copy_(state["beta_lambda"])
+        self.simplex_beta_initialized.copy_(state["beta_initialized"])
+        self.simplex_core_lambda.copy_(state["core_lambda"])
+        self.simplex_core_initialized.copy_(state["core_initialized"])
 
     def _regularization(self, log_beta, log_r):
         """Same penalty is added to the objective and its touching bound."""
@@ -291,14 +361,19 @@ class DLightSBMM(DLightSB):
         if not torch.isfinite(log_q).all():
             raise ValueError("MM requires a strictly positive finite reference transition")
 
-        # Return to the original simplex parameterization while preserving the
-        # represented potential through the compensating beta rescaling.
         log_r = self.log_cp_cores.detach().clone()
-        normalizers = torch.logsumexp(log_r, dim=1, keepdim=True)
-        log_r -= normalizers
         log_beta = self.log_alpha.detach().clone()
-        log_beta += normalizers.squeeze(1).sum(dim=0)
-        log_beta -= torch.logsumexp(log_beta, dim=0)
+        newton_initialized = bool(
+            self.simplex_beta_initialized.all()
+            and self.simplex_core_initialized.all()
+        )
+        if not newton_initialized:
+            # Canonicalize arbitrary initial DLightSB weights once. Subsequent
+            # iterations retain the unnormalized one-step Newton result.
+            normalizers = torch.logsumexp(log_r, dim=1, keepdim=True)
+            log_r -= normalizers
+            log_beta += normalizers.squeeze(1).sum(dim=0)
+            log_beta -= torch.logsumexp(log_beta, dim=0)
         invalid_log_r = torch.isnan(log_r).any() or torch.isposinf(log_r).any()
         invalid_log_beta = torch.isnan(log_beta).any() or torch.isposinf(log_beta).any()
         empty_core = ~torch.isfinite(log_r).any(dim=1).all()
@@ -349,6 +424,14 @@ class DLightSBMM(DLightSB):
                 if len(selected) > 0:
                     log_m[d, category] = torch.logsumexp(selected, dim=0)
 
+        beta_lambda = self.simplex_beta_lambda.clone()
+        beta_initialized = self.simplex_beta_initialized.clone()
+        core_lambda = self.simplex_core_lambda.clone()
+        core_initialized = self.simplex_core_initialized.clone()
+        beta_residual = log_beta.new_zeros((1, 1))
+        core_residual = log_r.new_zeros((dim, components, 1))
+        correction_max = log_beta.new_zeros(())
+
         def surrogate():
             # Constant C_t is unnecessary when comparing this same bound.
             ratio = (log_normalizer() - old_log_c).exp()
@@ -367,7 +450,21 @@ class DLightSBMM(DLightSB):
             log_a = torch.logsumexp(
                 log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
             )
-            log_beta = self._update_block(log_a, log_n, log_beta)
+            beta_update = self._update_block(
+                log_a,
+                log_n,
+                log_beta,
+                beta_lambda,
+                beta_initialized,
+            )
+            log_beta = beta_update["log_z"]
+            beta_lambda = beta_update["lambda"]
+            beta_initialized = torch.ones_like(beta_initialized)
+            beta_residual = beta_update["simplex_residual"]
+            correction_max = torch.maximum(
+                correction_max,
+                beta_update["newton_correction"].amax(),
+            )
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -384,9 +481,21 @@ class DLightSBMM(DLightSB):
                 log_b_linear = _logsumexp_matmul(
                     log_q[d].T, log_coefficients
                 )  # [S,K]
-                log_r[d] = self._update_block(
-                    log_b_linear.T, log_m[d].T, log_r[d].T
-                ).T
+                core_update = self._update_block(
+                    log_b_linear.T,
+                    log_m[d].T,
+                    log_r[d].T,
+                    core_lambda[d],
+                    core_initialized[d],
+                )
+                log_r[d] = core_update["log_z"].T
+                core_lambda[d] = core_update["lambda"]
+                core_initialized[d] = True
+                core_residual[d] = core_update["simplex_residual"]
+                correction_max = torch.maximum(
+                    correction_max,
+                    core_update["newton_correction"].amax(),
+                )
                 log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])
 
         bound_after, new_loss = surrogate().item(), objective().item()
@@ -407,5 +516,13 @@ class DLightSBMM(DLightSB):
 
         self.log_alpha.copy_(log_beta)
         self.log_cp_cores.copy_(log_r)
+        self.simplex_beta_lambda.copy_(beta_lambda)
+        self.simplex_beta_initialized.copy_(beta_initialized)
+        self.simplex_core_lambda.copy_(core_lambda)
+        self.simplex_core_initialized.copy_(core_initialized)
         return {"loss": new_loss, "loss_before": previous_loss,
-                "surrogate_decrease": bound_before - bound_after}
+                "surrogate_decrease": bound_before - bound_after,
+                "simplex_beta_residual": beta_residual.amax().item(),
+                "simplex_core_residual_max": core_residual.amax().item(),
+                "simplex_core_residual_mean": core_residual.mean().item(),
+                "simplex_newton_correction_max": correction_max.item()}
