@@ -1,8 +1,0 @@
-wandb:
-  _target_: lightning.pytorch.loggers.wandb.WandbLogger
-  name: ${hydra:runtime.choices.data}_${hydra:runtime.choices.method}_${prior.prior_type}_dim_${data.dim}_alpha_${prior.alpha}
-  save_dir: ${paths.output_dir}
-  project: alpha-csbm
-  entity: gregkseno # set to name of your wandb team
-  job_type: ${task_name}
-  offline: false
