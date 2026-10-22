@@ -66,13 +66,8 @@ def _support_preserving_update_from_logs(
 
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
-    """Use the same LSE backend as baseline, prior and benchmark.
-
-    CUDA uses the project's custom Triton kernel by default. CPU retains
-    the shared PyTorch reference fallback. MM never needs backward here.
-    """
-    return lse_matmul(log_a, log_b)
-
+    """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
+    return lse_matmul(log_a, log_b, implementation="triton")
 
 class _MMOptimizer(torch.optim.Optimizer):
     """Execute an analytic update through Lightning's optimizer bookkeeping.
