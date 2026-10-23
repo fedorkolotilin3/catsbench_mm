@@ -54,6 +54,17 @@ class ExponentialLogBlockTest(unittest.TestCase):
         )
         self.assertAlmostEqual(actual.item(), math.log(1e-12))
 
+    def test_regularized_update_can_disable_positive_floor(self):
+        actual = _exponential_log_update(
+            torch.tensor([1000.0], dtype=torch.float64),
+            torch.tensor([-1000.0], dtype=torch.float64),
+            torch.tensor([0.0], dtype=torch.float64),
+            0.03,
+            1e-12,
+            clip_updates=False,
+        )
+        self.assertLess(actual.item(), math.log(1e-12))
+
 
 class RegularizedMMTest(unittest.TestCase):
     def setUp(self):
@@ -73,11 +84,12 @@ class RegularizedMMTest(unittest.TestCase):
                 torch.tensor([[0, 0], [1, 1], [0, 1]], dtype=torch.long))
 
     def test_zero_strength_matches_original_including_missing_categories(self):
-        base = existing.DLightSBMMUpdateTest()._make_model()
+        base = existing.DLightSBMMUpdateTest()._make_model(clip_updates=False)
         model = DLightSBMMRegularized.from_model(
             base,
             regularization_lambda_alpha=0.,
             regularization_lambda_cores=0.,
+            clip_updates=False,
         )
         for _ in range(3):
             original = base.mm_step(*self.data())
@@ -145,6 +157,7 @@ class RegularizedMMTest(unittest.TestCase):
             )
             self.assertEqual(restored.hparams.regularization_lambda_alpha, .02)
             self.assertEqual(restored.hparams.regularization_lambda_cores, .7)
+            self.assertFalse(restored.hparams.clip_updates)
             torch.testing.assert_close(restored.log_alpha, model.log_alpha)
             info = restored.mm_step(*self.data())
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)
@@ -160,6 +173,8 @@ class RegularizedMMTest(unittest.TestCase):
                 self.assertEqual(cfg.method.regularization_lambda_alpha, .01)
                 self.assertEqual(cfg.method.regularization_lambda_cores, .5)
                 self.assertEqual(cfg.method.min_component_value, 1e-12)
+                self.assertTrue(base.method.clip_updates)
+                self.assertFalse(cfg.method.clip_updates)
                 self.assertEqual(cfg.data, base.data)
                 self.assertEqual(cfg.trainer, base.trainer)
 

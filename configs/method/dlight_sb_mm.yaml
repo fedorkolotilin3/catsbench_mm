@@ -13,5 +13,7 @@ entropy_warmup_steps: 20000
 entropy_lambda: 0
 sample_prob: 0.99
 tau: 1.0
-# Strict positive floor used by every analytic MM block update.
+# Positive floor used when clipping analytic MM block updates.
 min_component_value: 1.0e-12
+# Apply min_component_value to analytic MM updates.
+clip_updates: true
