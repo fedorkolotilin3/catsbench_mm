@@ -128,6 +128,260 @@ def _simplex_newton_step_from_logs(
     }
 
 
+def _log_newton_iteration(
+    log_delta,
+    scaled_log_b,
+    log_shifted,
+    log_lower,
+    log_upper,
+):
+    """Apply one Newton step to log(sum(b / denominator)) = 0."""
+    log_denominator = torch.logaddexp(log_shifted, log_delta)
+    log_mass = torch.logsumexp(
+        scaled_log_b - log_denominator,
+        dim=1,
+        keepdim=True,
+    )
+    log_second_sum = torch.logsumexp(
+        scaled_log_b - 2 * log_denominator,
+        dim=1,
+        keepdim=True,
+    )
+    log_mu = log_delta + log_second_sum - log_mass
+    correction = log_mass / log_mu.exp()
+    candidate = log_delta + correction
+    candidate = torch.where(torch.isfinite(candidate), candidate, log_delta)
+    return (
+        torch.maximum(torch.minimum(candidate, log_upper), log_lower),
+        correction.abs(),
+    )
+
+
+def _simplex_log_newton_4_core(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    initial_log_z: torch.Tensor,
+    previous_lambda: torch.Tensor,
+    initialized: torch.Tensor,
+):
+    """Run four fused log-Newton corrections after one shared preparation."""
+    finite_b = torch.isfinite(log_b)
+    has_counts = finite_b.any(dim=1, keepdim=True)
+
+    log_scale = torch.maximum(
+        log_a.amax(dim=1, keepdim=True),
+        log_b.amax(dim=1, keepdim=True),
+    )
+    log_scale = torch.where(torch.isfinite(log_scale), log_scale, 0.0)
+    scaled_log_a = log_a - log_scale
+    scaled_log_b = log_b - log_scale
+
+    active_minimum_log_a = scaled_log_a.masked_fill(
+        ~finite_b,
+        torch.inf,
+    ).amin(dim=1, keepdim=True)
+    all_minimum_log_a = scaled_log_a.amin(dim=1, keepdim=True)
+    minimum_log_a = torch.where(
+        has_counts,
+        active_minimum_log_a,
+        all_minimum_log_a,
+    )
+
+    greater = scaled_log_a > minimum_log_a
+    log_shifted = torch.where(
+        greater,
+        scaled_log_a
+        + torch.log1p(-torch.exp(minimum_log_a - scaled_log_a)),
+        -torch.inf,
+    )
+    at_minimum = finite_b & ~greater
+    active_log_lower = torch.logsumexp(
+        scaled_log_b.masked_fill(~at_minimum, -torch.inf),
+        dim=1,
+        keepdim=True,
+    )
+    log_upper = torch.logsumexp(
+        scaled_log_b.masked_fill(~finite_b, -torch.inf),
+        dim=1,
+        keepdim=True,
+    )
+
+    zero_count = ~finite_b
+    has_zero_count = zero_count.any(dim=1, keepdim=True)
+    minimum_zero_log_a = scaled_log_a.masked_fill(
+        ~zero_count,
+        torch.inf,
+    ).amin(dim=1, keepdim=True)
+    has_boundary = (
+        has_counts
+        & has_zero_count
+        & (minimum_log_a > minimum_zero_log_a)
+    )
+    boundary_log_ratio = torch.where(
+        has_boundary,
+        minimum_zero_log_a - minimum_log_a,
+        torch.zeros_like(minimum_log_a),
+    )
+    log_boundary_delta = torch.where(
+        has_boundary,
+        minimum_log_a + torch.log1p(-boundary_log_ratio.exp()),
+        torch.full_like(minimum_log_a, -torch.inf),
+    )
+
+    zero = torch.zeros_like(log_upper)
+    active_log_lower = torch.where(has_counts, active_log_lower, zero)
+    log_upper = torch.where(has_counts, log_upper, zero)
+    log_lower = torch.maximum(active_log_lower, log_boundary_delta)
+
+    shifted_a = log_shifted.exp()
+    initial_z = initial_log_z.exp()
+    upper_delta = log_upper.exp()
+    bootstrap_delta = upper_delta - (shifted_a * initial_z).sum(
+        dim=1,
+        keepdim=True,
+    )
+    previous_delta = previous_lambda + minimum_log_a.exp()
+    delta_start = torch.where(initialized, previous_delta, bootstrap_delta)
+    positive_start = delta_start > 0
+    safe_delta_start = torch.where(
+        positive_start,
+        delta_start,
+        torch.ones_like(delta_start),
+    )
+    log_delta = torch.where(
+        positive_start,
+        safe_delta_start.log(),
+        log_lower,
+    )
+    log_delta = torch.maximum(torch.minimum(log_delta, log_upper), log_lower)
+
+    log_delta, correction_1 = _log_newton_iteration(
+        log_delta,
+        scaled_log_b,
+        log_shifted,
+        log_lower,
+        log_upper,
+    )
+    log_delta, correction_2 = _log_newton_iteration(
+        log_delta,
+        scaled_log_b,
+        log_shifted,
+        log_lower,
+        log_upper,
+    )
+    log_delta, correction_3 = _log_newton_iteration(
+        log_delta,
+        scaled_log_b,
+        log_shifted,
+        log_lower,
+        log_upper,
+    )
+    log_delta, correction_4 = _log_newton_iteration(
+        log_delta,
+        scaled_log_b,
+        log_shifted,
+        log_lower,
+        log_upper,
+    )
+    correction_max = torch.maximum(
+        torch.maximum(correction_1, correction_2),
+        torch.maximum(correction_3, correction_4),
+    )
+
+    log_denominator = torch.logaddexp(log_shifted, log_delta)
+    active_log_z = scaled_log_b - log_denominator
+    smallest = torch.nextafter(
+        log_a.new_tensor(0.0),
+        log_a.new_tensor(1.0),
+    )
+    log_smallest = smallest.log()
+    active_log_z = torch.where(
+        finite_b,
+        active_log_z,
+        log_smallest,
+    )
+
+    boundary = has_boundary & (log_boundary_delta >= log_delta)
+    boundary_z = torch.where(
+        finite_b,
+        (scaled_log_b - log_denominator).exp(),
+        torch.zeros_like(log_a),
+    )
+    zero_minima = zero_count & (scaled_log_a == minimum_zero_log_a)
+    residual_mass = (1 - boundary_z.sum(dim=1, keepdim=True)).clamp_min(0)
+    boundary_z = boundary_z + (
+        zero_minima
+        * residual_mass
+        / zero_minima.sum(dim=1, keepdim=True).clamp_min(1)
+    )
+    boundary_z = torch.where(boundary_z == 0, smallest, boundary_z)
+    log_z = torch.where(boundary, boundary_z.log(), active_log_z)
+
+    minima = scaled_log_a == all_minimum_log_a
+    linear_z = minima.to(log_a.dtype) / minima.sum(dim=1, keepdim=True)
+    linear_z = torch.where(linear_z == 0, smallest, linear_z)
+    log_z = torch.where(has_counts, log_z, linear_z.log())
+
+    lambda_new = log_delta.exp() - minimum_log_a.exp()
+    lambda_new = torch.where(has_counts, lambda_new, previous_lambda)
+    correction_max = torch.where(
+        has_counts,
+        correction_max,
+        torch.zeros_like(correction_max),
+    )
+    return {
+        "log_z": log_z,
+        "lambda": lambda_new,
+        "simplex_residual": (
+            log_z.exp().sum(dim=1, keepdim=True) - 1
+        ).abs(),
+        "newton_correction": correction_max,
+    }
+
+
+_compiled_simplex_log_newton_4_core = torch.compile(
+    _simplex_log_newton_4_core,
+    fullgraph=True,
+    dynamic=False,
+    mode="reduce-overhead",
+)
+
+
+@torch.no_grad()
+def _simplex_log_newton_4_from_logs(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    initial_log_z: torch.Tensor,
+    previous_lambda: torch.Tensor,
+    initialized: torch.Tensor,
+):
+    """Apply four jointly compiled safeguarded log-Newton corrections."""
+    if (
+        log_a.shape != log_b.shape
+        or log_a.shape != initial_log_z.shape
+        or log_a.ndim != 2
+    ):
+        raise ValueError("log_a, log_b and initial_log_z must have the same 2D shape")
+    expected_state_shape = (log_a.shape[0], 1)
+    if previous_lambda.shape != expected_state_shape:
+        raise ValueError(f"previous_lambda must have shape {expected_state_shape}")
+    if initialized.shape != expected_state_shape:
+        raise ValueError(f"initialized must have shape {expected_state_shape}")
+
+    kernel = (
+        _compiled_simplex_log_newton_4_core
+        if log_a.is_cuda
+        else _simplex_log_newton_4_core
+    )
+    return kernel(
+        log_a,
+        log_b,
+        initial_log_z,
+        previous_lambda,
+        initialized,
+    )
+
+
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
     """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
@@ -155,8 +409,9 @@ class DLightSBMM(DLightSB):
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Each simplex multiplier gets one safeguarded Newton correction
-    warm-started from the preceding MM step. No explicit regularization is added.
+    statistics. Each simplex multiplier gets four jointly compiled safeguarded
+    log-Newton corrections warm-started from the preceding MM step. No explicit
+    regularization is added.
     """
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
@@ -218,7 +473,7 @@ class DLightSBMM(DLightSB):
             log_a = log_a.unsqueeze(0)
             log_b = log_b.unsqueeze(0)
             current_log_z = current_log_z.unsqueeze(0)
-        result = _simplex_newton_step_from_logs(
+        result = _simplex_log_newton_4_from_logs(
             log_a,
             log_b,
             current_log_z,
@@ -253,7 +508,7 @@ class DLightSBMM(DLightSB):
         return log_beta.new_zeros(())
 
     def _enforce_monotonicity(self):
-        """One inexact Newton correction is not an exact block minimizer."""
+        """Four inexact log-Newton corrections are not an exact minimizer."""
         return False
 
     def on_train_start(self):

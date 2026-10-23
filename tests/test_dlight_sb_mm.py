@@ -6,6 +6,7 @@ from src.data.prior import Prior
 from src.methods.dlight_sb_mm import (
     DLightSBMM,
     _logsumexp_matmul,
+    _simplex_log_newton_4_from_logs,
     _simplex_newton_step_from_logs,
 )
 
@@ -142,6 +143,113 @@ class SimplexNewtonStepTest(unittest.TestCase):
         torch.testing.assert_close(
             result["log_z"].exp().sum(dim=1),
             torch.ones(1, dtype=a.dtype),
+        )
+
+
+class SimplexLogNewtonStepTest(unittest.TestCase):
+    def _step(self, a, b, z, previous_lambda, initialized=True):
+        return _simplex_log_newton_4_from_logs(
+            a.log(),
+            b.log(),
+            z.log(),
+            previous_lambda,
+            torch.full_like(previous_lambda, initialized, dtype=torch.bool),
+        )
+
+    def test_fixed_point_matches_closed_form_kkt_solution(self):
+        a = torch.tensor([[2.0, 3.0, 1.0]], dtype=torch.float64)
+        expected_z = torch.tensor([[0.2, 0.3, 0.5]], dtype=torch.float64)
+        physical_lambda = 2.0
+        b = expected_z * (a + physical_lambda)
+        scale = torch.maximum(
+            a.amax(dim=1, keepdim=True),
+            b.amax(dim=1, keepdim=True),
+        )
+        scaled_lambda = torch.full(
+            (1, 1),
+            physical_lambda,
+            dtype=a.dtype,
+        ) / scale
+
+        result = self._step(a, b, expected_z, scaled_lambda)
+
+        torch.testing.assert_close(result["log_z"].exp(), expected_z)
+        torch.testing.assert_close(
+            result["newton_correction"],
+            torch.zeros_like(scaled_lambda),
+            atol=1e-15,
+            rtol=0,
+        )
+
+    def test_four_steps_match_explicit_log_newton_formula(self):
+        a = torch.tensor([[0.4, 0.8, 1.0]], dtype=torch.float64)
+        b = torch.tensor([[0.2, 0.3, 0.4]], dtype=torch.float64)
+        initial_z = torch.full_like(a, 1 / 3)
+        previous_lambda = torch.tensor([[0.2]], dtype=a.dtype)
+
+        scale = torch.maximum(
+            a.amax(dim=1, keepdim=True),
+            b.amax(dim=1, keepdim=True),
+        )
+        scaled_a = a / scale
+        scaled_b = b / scale
+        minimum = scaled_a.amin(dim=1, keepdim=True)
+        shifted = scaled_a - minimum
+        lower = scaled_b.masked_fill(shifted != 0, 0).sum(
+            dim=1,
+            keepdim=True,
+        )
+        upper = scaled_b.sum(dim=1, keepdim=True)
+        log_delta = (previous_lambda + minimum).log()
+        log_lower = lower.log()
+        log_upper = upper.log()
+
+        for _ in range(4):
+            delta = log_delta.exp()
+            denominator = shifted + delta
+            mass = (scaled_b / denominator).sum(dim=1, keepdim=True)
+            second_sum = (
+                scaled_b / denominator.square()
+            ).sum(dim=1, keepdim=True)
+            mu = delta * second_sum / mass
+            log_delta = log_delta + mass.log() / mu
+            log_delta = torch.maximum(
+                torch.minimum(log_delta, log_upper),
+                log_lower,
+            )
+
+        expected_z = scaled_b / (shifted + log_delta.exp())
+        expected_lambda = log_delta.exp() - minimum
+        result = self._step(a, b, initial_z, previous_lambda)
+
+        torch.testing.assert_close(result["log_z"].exp(), expected_z)
+        torch.testing.assert_close(result["lambda"], expected_lambda)
+
+    def test_missing_counts_keep_parameters_finite_and_on_simplex(self):
+        log_a = torch.tensor(
+            [[-2.0, -1.0, 0.0], [-1.0, -1.0, 0.0]],
+            dtype=torch.float64,
+        )
+        log_b = torch.tensor(
+            [[-torch.inf, -torch.inf, -torch.inf], [-torch.inf, 0.0, -1.0]],
+            dtype=torch.float64,
+        )
+        initial_log_z = torch.full_like(log_a, -torch.log(log_a.new_tensor(3.0)))
+        previous_lambda = torch.zeros((2, 1), dtype=log_a.dtype)
+        initialized = torch.zeros((2, 1), dtype=torch.bool)
+
+        result = _simplex_log_newton_4_from_logs(
+            log_a,
+            log_b,
+            initial_log_z,
+            previous_lambda,
+            initialized,
+        )
+
+        self.assertTrue(torch.isfinite(result["log_z"]).all())
+        torch.testing.assert_close(
+            result["log_z"].exp().sum(dim=1),
+            torch.ones(2, dtype=log_a.dtype),
         )
 
 

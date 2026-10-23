@@ -7,6 +7,7 @@ import test_dlight_sb_mm as existing
 from src.methods.dlight_sb import DLightSB
 from src.methods.dlight_sb_mm import (
     DLightSBMM, _MMOptimizer, _logsumexp_matmul,
+    _simplex_log_newton_4_from_logs,
     _simplex_newton_step_from_logs,
 )
 from src.methods.mm_regularized import (
@@ -68,6 +69,13 @@ class MMNoGradTest(unittest.TestCase):
             results = [
                 _logsumexp_matmul(a, b),
                 _simplex_newton_step_from_logs(
+                    a,
+                    b,
+                    initial_log_z,
+                    previous_lambda,
+                    initialized,
+                ),
+                _simplex_log_newton_4_from_logs(
                     a,
                     b,
                     initial_log_z,
