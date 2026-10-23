@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -79,6 +80,17 @@ class NonnegativeBlockMinimumTest(unittest.TestCase):
                 torch.tensor([0.0], dtype=torch.float64),
                 torch.tensor([0.0], dtype=torch.float64),
             )
+
+    def test_update_respects_positive_floor(self):
+        floor = 1e-12
+        result = _support_preserving_update_from_logs(
+            torch.tensor([100.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            floor,
+        )
+        expected = torch.full_like(result, math.log(floor))
+        torch.testing.assert_close(result, expected)
 
 
 class DLightSBMMUpdateTest(unittest.TestCase):

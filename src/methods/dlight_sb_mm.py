@@ -31,6 +31,7 @@ def _support_preserving_update_from_logs(
     log_a: torch.Tensor,
     log_b: torch.Tensor,
     current_log_z: torch.Tensor,
+    min_component_value: float = 1e-12,
 ) -> torch.Tensor:
     """Apply a support-preserving MM update to ``a*z - b*log(z)``.
 
@@ -45,6 +46,8 @@ def _support_preserving_update_from_logs(
     """
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
         raise ValueError("log_a, log_b and current_log_z must have the same shape")
+    if not math.isfinite(min_component_value) or min_component_value <= 0:
+        raise ValueError("min_component_value must be finite and positive")
     for value in (log_a, log_b, current_log_z):
         if torch.isnan(value).any() or torch.isposinf(value).any():
             raise ValueError("Log parameters may contain finite values and -inf only")
@@ -56,9 +59,10 @@ def _support_preserving_update_from_logs(
             "The nonnegative MM block is unbounded: a=0 and b>0"
         )
 
-    log_z = current_log_z.clone()
+    log_floor = log_a.new_tensor(math.log(min_component_value))
+    log_z = current_log_z.clamp_min(log_floor)
     interior = positive_a & positive_b
-    log_z = torch.where(interior, log_b - log_a, log_z)
+    log_z = torch.where(interior, (log_b - log_a).clamp_min(log_floor), log_z)
     if torch.isnan(log_z).any() or torch.isposinf(log_z).any():
         raise FloatingPointError("Non-finite support-preserving MM block update")
     return log_z
@@ -99,7 +103,14 @@ class DLightSBMM(DLightSB):
 
     fix_beta = True
 
-    def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        inner_sweeps=1,
+        tol=None,
+        min_component_value=1e-12,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if self.hparams.entropy_lambda != 0 or self.hparams.scheduler is not None:
             raise ValueError("MM requires entropy_lambda=0 and scheduler=None")
@@ -107,7 +118,9 @@ class DLightSBMM(DLightSB):
             raise ValueError("inner_sweeps must be a positive integer")
         if tol is not None and (not math.isfinite(tol) or tol < 0):
             raise ValueError("tol must be None or a finite nonnegative number")
-        self.save_hyperparameters("inner_sweeps", "tol")
+        if not math.isfinite(min_component_value) or min_component_value <= 0:
+            raise ValueError("min_component_value must be finite and positive")
+        self.save_hyperparameters("inner_sweeps", "tol", "min_component_value")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
         # MM updates parameters analytically. Also keep inherited evaluation
@@ -122,7 +135,12 @@ class DLightSBMM(DLightSB):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
     def _update_block(self, log_a, log_b, current_log_z):
-        return _support_preserving_update_from_logs(log_a, log_b, current_log_z)
+        return _support_preserving_update_from_logs(
+            log_a,
+            log_b,
+            current_log_z,
+            self.hparams.min_component_value,
+        )
 
     def _regularization(self, log_beta, log_r):
         """Same penalty is added to the objective and its touching bound."""

@@ -12,10 +12,18 @@ from .dlight_sb_mm import DLightSBMM
 
 
 @torch.no_grad()
-def _exponential_log_update(log_a, log_b, current_log_z, strength):
+def _exponential_log_update(
+    log_a,
+    log_b,
+    current_log_z,
+    strength,
+    min_component_value=1e-12,
+):
     """Minimize (a+lambda)*exp(u) - (b+lambda)*u without root finding."""
     if not math.isfinite(strength) or strength <= 0:
         raise ValueError("strength must be finite and positive")
+    if not math.isfinite(min_component_value) or min_component_value <= 0:
+        raise ValueError("min_component_value must be finite and positive")
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
         raise ValueError("Block tensors must have the same shape")
     if not torch.isfinite(current_log_z).all():
@@ -25,6 +33,7 @@ def _exponential_log_update(log_a, log_b, current_log_z, strength):
             raise ValueError("Log coefficients must be finite or -inf")
     log_strength = log_a.new_tensor(math.log(strength))
     result = torch.logaddexp(log_b, log_strength) - torch.logaddexp(log_a, log_strength)
+    result = result.clamp_min(math.log(min_component_value))
     if not torch.isfinite(result).all():
         raise FloatingPointError("Non-finite regularized block minimizer")
     return result
@@ -73,7 +82,11 @@ class DLightSBMMRegularized(DLightSBMM):
         if self.hparams.regularization_lambda == 0:
             return super()._update_block(log_a, log_b, current_log_z)
         return _exponential_log_update(
-            log_a, log_b, current_log_z, self.hparams.regularization_lambda
+            log_a,
+            log_b,
+            current_log_z,
+            self.hparams.regularization_lambda,
+            self.hparams.min_component_value,
         )
 
     @torch.no_grad()
