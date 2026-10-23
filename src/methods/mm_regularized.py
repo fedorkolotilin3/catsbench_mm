@@ -54,7 +54,9 @@ class DLightSBMMRegularized(DLightSBMM):
     The penalty is a sum, not a mean. Lambda=0 restores the original MM,
     including support preservation for zero batch counts. For lambda>0 all
     initial log parameters must be finite. Loss and stopping refer to the
-    regularized objective; data_loss and regularization are logged separately.
+    regularized objective; the scalar minimizer is clipped to the configured
+    positive component floor. Data loss and regularization are logged
+    separately.
     """
 
     def __init__(self, *args, regularization_lambda=0.0001, **kwargs):
