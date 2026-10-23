@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Literal, Optional, Tuple, Union
 
 import torch
@@ -46,8 +46,6 @@ class BenchmarkBase(nn.Module, BenchmarkModelHubMixin):
         num_timesteps: Optional[int] = None
     ):
         super().__init__()
-        # This isolated experiment computes the reference benchmark in float64.
-        config = replace(config, params_dtype="float64")
         self.config = config
         self.dim = config.dim
         self.input_shape = config.input_shape
