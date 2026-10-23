@@ -17,3 +17,4 @@ entropy_warmup_steps: 20000
 entropy_lambda: 0 # 10
 sample_prob: 0.99
 tau: 1.0
+freeze_beta: true
