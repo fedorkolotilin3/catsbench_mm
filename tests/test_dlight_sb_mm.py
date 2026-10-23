@@ -72,6 +72,28 @@ class SimplexBlockMinimumTest(unittest.TestCase):
 
         torch.testing.assert_close(actual, expected)
 
+    def test_32_steps_match_previous_100_step_solution(self):
+        generator = torch.Generator().manual_seed(42)
+        a = torch.rand((64, 16), generator=generator, dtype=torch.float64) * 10
+        b = torch.rand((64, 16), generator=generator, dtype=torch.float64) * 10
+
+        expected = _simplex_minimum(a, b, bisection_steps=100)
+        actual = _simplex_minimum(a, b, bisection_steps=32)
+
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-8)
+        torch.testing.assert_close(
+            actual.sum(dim=1),
+            torch.ones(64, dtype=actual.dtype),
+        )
+
+    def test_bisection_steps_must_be_positive_integer(self):
+        a = torch.ones((1, 2), dtype=torch.float64)
+        b = torch.ones_like(a)
+
+        for invalid in (0, -1, 1.5, True):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                _simplex_minimum(a, b, bisection_steps=invalid)
+
 
 class DLightSBMMUpdateTest(unittest.TestCase):
     def _make_model(self) -> DLightSBMM:

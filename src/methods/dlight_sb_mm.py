@@ -26,13 +26,12 @@ from catsbench.utils import lse_matmul
 from .dlight_sb import DLightSB
 
 
-def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Minimize ``a*z - b*log(z)`` row-wise on the closed simplex."""
-    if a.shape != b.shape or a.ndim != 2:
-        raise ValueError("a and b must have the same two-dimensional shape")
-    if not torch.isfinite(a).all() or not torch.isfinite(b).all() or (b < 0).any():
-        raise ValueError("Expected finite coefficients and nonnegative counts")
-
+def _simplex_minimum_core(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bisection_steps: int,
+) -> torch.Tensor:
+    """Run a fixed number of log-bisection steps without Python-side checks."""
     positive = b > 0
     has_counts = positive.any(dim=1, keepdim=True)
     minimum = a.masked_fill(~positive, torch.inf).amin(dim=1, keepdim=True)
@@ -43,7 +42,7 @@ def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     upper = b.sum(dim=1, keepdim=True)
     lo = torch.where(has_counts, lower, torch.ones_like(lower)).log()
     hi = torch.where(has_counts, upper, torch.ones_like(upper)).log()
-    for _ in range(100):
+    for _ in range(bisection_steps):
         log_mid = (lo + hi) / 2
         delta = log_mid.exp()
         denominator = torch.where(positive, shifted + delta, torch.ones_like(a))
@@ -77,17 +76,29 @@ def _simplex_minimum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.where(z == 0, smallest, z)
 
 
-@torch.no_grad()
-def _simplex_minimum_from_logs(
-    log_a: torch.Tensor, log_b: torch.Tensor
+def _simplex_minimum(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bisection_steps: int = 32,
 ) -> torch.Tensor:
-    """Solve the simplex block problem from log coefficients."""
-    if log_a.shape != log_b.shape or log_a.ndim != 2:
-        raise ValueError("log_a and log_b must have the same two-dimensional shape")
-    for value in (log_a, log_b):
-        if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log coefficients may contain finite values and -inf only")
+    """Minimize ``a*z - b*log(z)`` row-wise on the closed simplex."""
+    if a.shape != b.shape or a.ndim != 2:
+        raise ValueError("a and b must have the same two-dimensional shape")
+    if not isinstance(bisection_steps, int) or isinstance(bisection_steps, bool):
+        raise ValueError("bisection_steps must be a positive integer")
+    if bisection_steps < 1:
+        raise ValueError("bisection_steps must be a positive integer")
+    if not torch.isfinite(a).all() or not torch.isfinite(b).all() or (b < 0).any():
+        raise ValueError("Expected finite coefficients and nonnegative counts")
+    return _simplex_minimum_core(a, b, bisection_steps)
 
+
+def _simplex_minimum_from_logs_core(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    bisection_steps: int,
+) -> torch.Tensor:
+    """Prepare stable coefficients and solve the simplex block."""
     shift = torch.maximum(
         log_a.amax(dim=1, keepdim=True),
         log_b.amax(dim=1, keepdim=True),
@@ -97,7 +108,47 @@ def _simplex_minimum_from_logs(
     b = torch.exp(log_b - shift)
     smallest = torch.nextafter(b.new_tensor(0.0), b.new_tensor(1.0))
     b = torch.where(torch.isfinite(log_b) & (b == 0), smallest, b)
-    return _simplex_minimum(a, b)
+    return _simplex_minimum_core(a, b, bisection_steps)
+
+
+_compiled_simplex_minimum_from_logs_core = torch.compile(
+    _simplex_minimum_from_logs_core,
+    fullgraph=True,
+    dynamic=False,
+    mode="reduce-overhead",
+)
+
+
+@torch.no_grad()
+def _simplex_minimum_from_logs(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    bisection_steps: int = 32,
+) -> torch.Tensor:
+    """Solve the simplex block problem from log coefficients."""
+    if log_a.shape != log_b.shape or log_a.ndim != 2:
+        raise ValueError("log_a and log_b must have the same two-dimensional shape")
+    # Reductions followed by Python truth conversion synchronize CUDA. Keep
+    # eager diagnostics on CPU; the MM candidate finiteness check guards the
+    # compiled CUDA path without synchronizing once per parameter block.
+    if not log_a.is_cuda:
+        for value in (log_a, log_b):
+            if torch.isnan(value).any() or torch.isposinf(value).any():
+                raise ValueError("Log coefficients may contain finite values and -inf only")
+    if not isinstance(bisection_steps, int) or isinstance(bisection_steps, bool):
+        raise ValueError("bisection_steps must be a positive integer")
+    if bisection_steps < 1:
+        raise ValueError("bisection_steps must be a positive integer")
+
+    kernel = (
+        _compiled_simplex_minimum_from_logs_core
+        if log_a.is_cuda
+        else _simplex_minimum_from_logs_core
+    )
+    result = kernel(log_a, log_b, bisection_steps)
+    # reduce-overhead reuses CUDA Graph output buffers on later invocations.
+    # MM invokes this kernel for several blocks before consuming all outputs.
+    return result.clone() if log_a.is_cuda else result
 
 
 @torch.no_grad()
@@ -128,10 +179,18 @@ class DLightSBMM(DLightSB):
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
     statistics. The component weights and every categorical core are optimized
-    on closed simplexes. No explicit regularization is added.
+    on closed simplexes by a jointly compiled fixed-step log-bisection. No
+    explicit regularization is added.
     """
 
-    def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        inner_sweeps=1,
+        tol=None,
+        bisection_steps=32,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if self.hparams.entropy_lambda != 0 or self.hparams.scheduler is not None:
             raise ValueError("MM requires entropy_lambda=0 and scheduler=None")
@@ -139,7 +198,11 @@ class DLightSBMM(DLightSB):
             raise ValueError("inner_sweeps must be a positive integer")
         if tol is not None and (not math.isfinite(tol) or tol < 0):
             raise ValueError("tol must be None or a finite nonnegative number")
-        self.save_hyperparameters("inner_sweeps", "tol")
+        if not isinstance(bisection_steps, int) or isinstance(bisection_steps, bool):
+            raise ValueError("bisection_steps must be a positive integer")
+        if bisection_steps < 1:
+            raise ValueError("bisection_steps must be a positive integer")
+        self.save_hyperparameters("inner_sweeps", "tol", "bisection_steps")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
         self.requires_grad_(False)
@@ -157,7 +220,11 @@ class DLightSBMM(DLightSB):
         if squeeze:
             log_a = log_a.unsqueeze(0)
             log_b = log_b.unsqueeze(0)
-        result = _simplex_minimum_from_logs(log_a, log_b).log()
+        result = _simplex_minimum_from_logs(
+            log_a,
+            log_b,
+            self.hparams.bisection_steps,
+        ).log()
         return result.squeeze(0) if squeeze else result
 
     def _regularization(self, log_beta, log_r):
