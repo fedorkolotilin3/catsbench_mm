@@ -1,3 +1,4 @@
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,9 +39,20 @@ class ExponentialLogBlockTest(unittest.TestCase):
                 def derivative(u):
                     return math.exp(min(la + u, 700)) + strength * math.exp(min(u, 700)) - math.exp(lb) - strength
                 expected.append(brentq(derivative, -2000., 2000., xtol=1e-12))
-            torch.testing.assert_close(actual, torch.tensor(expected, dtype=dtype),
+            expected = torch.tensor(expected, dtype=dtype).clamp_min(math.log(1e-12))
+            torch.testing.assert_close(actual, expected,
                                        atol=2e-4 if dtype == torch.float32 else 1e-10,
                                        rtol=2e-6 if dtype == torch.float32 else 1e-10)
+
+    def test_regularized_update_respects_positive_floor(self):
+        actual = _exponential_log_update(
+            torch.tensor([1000.0], dtype=torch.float64),
+            torch.tensor([-1000.0], dtype=torch.float64),
+            torch.tensor([0.0], dtype=torch.float64),
+            0.03,
+            1e-12,
+        )
+        self.assertAlmostEqual(actual.item(), math.log(1e-12))
 
 
 class RegularizedMMTest(unittest.TestCase):
@@ -131,6 +143,7 @@ class RegularizedMMTest(unittest.TestCase):
                 cfg = compose(config_name="config", overrides=[f"experiment=mm_regularized/{name}"])
                 self.assertEqual(cfg.method._target_, "src.methods.mm_regularized.DLightSBMMRegularized")
                 self.assertEqual(cfg.method.regularization_lambda, .0001)
+                self.assertEqual(cfg.method.min_component_value, 1e-12)
                 self.assertEqual(cfg.data, base.data)
                 self.assertEqual(cfg.trainer, base.trainer)
 
