@@ -1,4 +1,4 @@
-"""Block-MM for the unregularized DLightSB loss (see theory.md).
+"""Unregularized block-MM followed by a simplex reparameterization.
 
 Usage:
     solver = DLightSBMM.from_model(model, state_dict=initial_state)
@@ -65,6 +65,39 @@ def _support_preserving_update_from_logs(
 
 
 @torch.no_grad()
+def _project_potentials_to_simplex(
+    log_beta: torch.Tensor,
+    log_r: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Put beta and every categorical core on simplices without changing loss.
+
+    Each core ``r[d, :, k]`` is divided by its sum. Its removed scale is
+    absorbed into ``beta[k]`` before beta is normalized. The resulting
+    potential differs from the input only by one global positive factor, which
+    cancels between the normalizer and target terms of the DLightSB loss.
+    """
+    if log_beta.ndim != 1 or log_r.ndim != 3:
+        raise ValueError("Expected log_beta [K] and log_r [D, S, K]")
+    if log_r.shape[-1] != log_beta.shape[0]:
+        raise ValueError("Beta and core component counts must match")
+    for value in (log_beta, log_r):
+        if torch.isnan(value).any() or torch.isposinf(value).any():
+            raise ValueError("Log parameters may contain finite values and -inf only")
+
+    log_core_mass = torch.logsumexp(log_r, dim=1)
+    if not torch.isfinite(log_core_mass).all():
+        raise FloatingPointError("Every core simplex must have positive mass")
+    projected_log_r = log_r - log_core_mass[:, None, :]
+
+    compensated_log_beta = log_beta + log_core_mass.sum(dim=0)
+    log_beta_mass = torch.logsumexp(compensated_log_beta, dim=0)
+    if not torch.isfinite(log_beta_mass):
+        raise FloatingPointError("The beta simplex must have positive mass")
+    projected_log_beta = compensated_log_beta - log_beta_mass
+    return projected_log_beta, projected_log_r
+
+
+@torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
     """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
     return lse_matmul(log_a, log_b, implementation="triton")
@@ -87,14 +120,17 @@ class _MMOptimizer(torch.optim.Optimizer):
 
 
 class DLightSBMM(DLightSB):
-    """DLightSB with one analytic block-MM sweep per Lightning training_step.
+    """DLightSB with an ordinary MM sweep then simplex reparameterization.
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Parameters are constrained only to be nonnegative; each block
-    uses the explicit minimizer ``z = b / a`` for positive sufficient
-    statistics and preserves coordinates with zero stochastic-batch counts.
+    statistics. After the unconstrained nonnegative MM candidate passes its
+    monotonicity checks, every categorical core and beta are mapped to their
+    simplices with compensating scales. This changes only the parameterization
+    and leaves the model loss invariant.
     """
+
+    project_after_mm = True
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -340,23 +376,56 @@ class DLightSBMM(DLightSB):
                 ).T
                 log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])
 
-        bound_after, new_loss = surrogate().item(), objective().item()
+        bound_after, candidate_loss = surrogate().item(), objective().item()
         previous_loss = initial_loss.item()
         scale = max(1.0, abs(previous_loss), abs(bound_before))
         allowance = 64 * torch.finfo(self.dtype).eps * scale
         if (
-            not math.isfinite(bound_after) or not math.isfinite(new_loss)
+            not math.isfinite(bound_after) or not math.isfinite(candidate_loss)
             or bound_after > bound_before + allowance
-            or new_loss > previous_loss + allowance
+            or candidate_loss > previous_loss + allowance
         ):
             raise FloatingPointError(
                 f"MM step failed monotonicity: "
                 f"G {bound_before:.16g} -> {bound_after:.16g}, "
-                f"loss {previous_loss:.16g} -> {new_loss:.16g}; "
+                f"loss {previous_loss:.16g} -> {candidate_loss:.16g}; "
                 "no candidate weights committed"
             )
 
+        if self.project_after_mm:
+            log_beta, log_r = _project_potentials_to_simplex(log_beta, log_r)
+            log_u = torch.stack([
+                _logsumexp_matmul(log_q[d], log_r[d]) for d in range(dim)
+            ])
+            new_loss = objective().item()
+            projection_delta = new_loss - candidate_loss
+            projection_scale = max(1.0, abs(candidate_loss), abs(new_loss))
+            projection_allowance = (
+                128 * torch.finfo(self.dtype).eps * projection_scale
+            )
+            if (
+                not math.isfinite(new_loss)
+                or abs(projection_delta) > projection_allowance
+            ):
+                raise FloatingPointError(
+                    "Simplex projection changed the scale-invariant loss: "
+                    f"{candidate_loss:.16g} -> {new_loss:.16g}; "
+                    "no candidate weights committed"
+                )
+        else:
+            new_loss = candidate_loss
+            projection_delta = 0.0
+
         self.log_alpha.copy_(log_beta)
         self.log_cp_cores.copy_(log_r)
-        return {"loss": new_loss, "loss_before": previous_loss,
+        info = {"loss": new_loss, "loss_before": previous_loss,
                 "surrogate_decrease": bound_before - bound_after}
+        if self.project_after_mm:
+            info.update(
+                projection_loss_delta=projection_delta,
+                simplex_beta_residual=log_beta.exp().sum().sub(1).abs().item(),
+                simplex_core_residual_max=(
+                    log_r.exp().sum(dim=1).sub(1).abs().amax().item()
+                ),
+            )
+        return info

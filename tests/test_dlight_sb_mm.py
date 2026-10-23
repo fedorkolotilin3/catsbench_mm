@@ -6,6 +6,7 @@ from src.data.prior import Prior
 from src.methods.dlight_sb_mm import (
     DLightSBMM,
     _logsumexp_matmul,
+    _project_potentials_to_simplex,
     _support_preserving_update_from_logs,
 )
 
@@ -81,6 +82,29 @@ class NonnegativeBlockMinimumTest(unittest.TestCase):
             )
 
 
+class SimplexProjectionTest(unittest.TestCase):
+    def test_projection_normalizes_and_preserves_component_potentials(self):
+        generator = torch.Generator().manual_seed(7)
+        log_beta = torch.randn(3, generator=generator, dtype=torch.float64)
+        log_r = torch.randn(2, 4, 3, generator=generator, dtype=torch.float64)
+
+        projected_beta, projected_r = _project_potentials_to_simplex(
+            log_beta, log_r
+        )
+
+        torch.testing.assert_close(
+            projected_beta.exp().sum(), torch.tensor(1.0, dtype=torch.float64)
+        )
+        torch.testing.assert_close(
+            projected_r.exp().sum(dim=1),
+            torch.ones((2, 3), dtype=torch.float64),
+        )
+        before = log_beta + log_r[:, 0, :].sum(dim=0)
+        after = projected_beta + projected_r[:, 0, :].sum(dim=0)
+        shift = after - before
+        torch.testing.assert_close(shift, shift[0].expand_as(shift))
+
+
 class DLightSBMMUpdateTest(unittest.TestCase):
     def _make_model(self) -> DLightSBMM:
         prior = Prior(
@@ -109,12 +133,11 @@ class DLightSBMMUpdateTest(unittest.TestCase):
         model.init_weights()
         return model
 
-    def test_mm_step_is_monotone_without_simplex_projection(self):
+    def test_mm_step_is_monotone_then_projects_to_simplex(self):
         torch.manual_seed(0)
         model = self._make_model()
         with torch.no_grad():
-            # A global scale is a valid unnormalized representation. The old
-            # simplex implementation erased it by forcing sum(beta) == 1.
+            # Start away from the requested simplex representation.
             model.log_alpha.add_(10.0)
 
         x0 = torch.tensor(
@@ -132,22 +155,33 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             info = model.mm_step(x0, x1)
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)
             self.assertGreaterEqual(info["surrogate_decrease"], -1e-10)
+            self.assertLessEqual(abs(info["projection_loss_delta"]), 1e-10)
+            self.assertLessEqual(info["simplex_beta_residual"], 1e-12)
+            self.assertLessEqual(info["simplex_core_residual_max"], 1e-12)
 
         self.assertFalse(torch.isnan(model.log_alpha).any())
         self.assertFalse(torch.isposinf(model.log_alpha).any())
-        self.assertGreater(torch.logsumexp(model.log_alpha, dim=0).item(), 1.0)
+        self.assertAlmostEqual(torch.logsumexp(model.log_alpha, dim=0).item(), 0.0)
+        torch.testing.assert_close(
+            torch.logsumexp(model.log_cp_cores, dim=1),
+            torch.zeros((2, 2), dtype=torch.float64),
+            atol=1e-12,
+            rtol=0.0,
+        )
 
-    def test_unobserved_target_category_preserves_support(self):
+    def test_unobserved_target_category_keeps_positive_support(self):
         torch.manual_seed(0)
         model = self._make_model()
-        previous = model.log_cp_cores[:, 2].detach().clone()
         x0 = torch.tensor([[0, 0], [1, 1], [2, 2]], dtype=torch.long)
         x1 = torch.tensor([[0, 0], [1, 1], [0, 1], [1, 0]], dtype=torch.long)
 
         model.mm_step(x0, x1)
 
-        self.assertTrue(torch.equal(model.log_cp_cores[:, 2], previous))
         self.assertTrue(torch.isfinite(model.log_cp_cores).all())
+        torch.testing.assert_close(
+            torch.logsumexp(model.log_cp_cores, dim=1),
+            torch.zeros((2, 2), dtype=torch.float64),
+        )
 
     def test_category_missing_then_observed_keeps_objective_finite(self):
         torch.manual_seed(0)

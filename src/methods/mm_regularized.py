@@ -48,6 +48,11 @@ class DLightSBMMRegularized(DLightSBMM):
     regularized objective; data_loss and regularization are logged separately.
     """
 
+    @property
+    def project_after_mm(self):
+        # Lambda zero is required to reproduce this branch's base algorithm.
+        return self.hparams.regularization_lambda == 0
+
     def __init__(self, *args, regularization_lambda=0.0001, **kwargs):
         if not math.isfinite(regularization_lambda) or regularization_lambda < 0:
             raise ValueError("regularization_lambda must be finite and nonnegative")
