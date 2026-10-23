@@ -13,3 +13,4 @@ entropy_warmup_steps: 20000
 entropy_lambda: 0
 sample_prob: 0.99
 tau: 1.0
+log_newton_mu0: 0.03

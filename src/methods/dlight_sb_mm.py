@@ -134,8 +134,9 @@ def _log_newton_iteration(
     log_shifted,
     log_lower,
     log_upper,
+    mu0,
 ):
-    """Apply one Newton step to log(sum(b / denominator)) = 0."""
+    """Apply Newton or a monotone fixed-point step according to conditioning."""
     log_denominator = torch.logaddexp(log_shifted, log_delta)
     log_mass = torch.logsumexp(
         scaled_log_b - log_denominator,
@@ -148,7 +149,10 @@ def _log_newton_iteration(
         keepdim=True,
     )
     log_mu = log_delta + log_second_sum - log_mass
-    correction = log_mass / log_mu.exp()
+    mu = log_mu.exp()
+    newton_correction = log_mass / mu
+    use_newton = (mu >= mu0) | (log_mass.abs() <= mu)
+    correction = torch.where(use_newton, newton_correction, log_mass)
     candidate = log_delta + correction
     candidate = torch.where(torch.isfinite(candidate), candidate, log_delta)
     return (
@@ -163,8 +167,9 @@ def _simplex_log_newton_4_core(
     initial_log_z: torch.Tensor,
     previous_lambda: torch.Tensor,
     initialized: torch.Tensor,
+    mu0: float,
 ):
-    """Run four fused log-Newton corrections after one shared preparation."""
+    """Run four fused condition-aware root corrections after shared preparation."""
     finite_b = torch.isfinite(log_b)
     has_counts = finite_b.any(dim=1, keepdim=True)
 
@@ -261,6 +266,7 @@ def _simplex_log_newton_4_core(
         log_shifted,
         log_lower,
         log_upper,
+        mu0,
     )
     log_delta, correction_2 = _log_newton_iteration(
         log_delta,
@@ -268,6 +274,7 @@ def _simplex_log_newton_4_core(
         log_shifted,
         log_lower,
         log_upper,
+        mu0,
     )
     log_delta, correction_3 = _log_newton_iteration(
         log_delta,
@@ -275,6 +282,7 @@ def _simplex_log_newton_4_core(
         log_shifted,
         log_lower,
         log_upper,
+        mu0,
     )
     log_delta, correction_4 = _log_newton_iteration(
         log_delta,
@@ -282,6 +290,7 @@ def _simplex_log_newton_4_core(
         log_shifted,
         log_lower,
         log_upper,
+        mu0,
     )
     correction_max = torch.maximum(
         torch.maximum(correction_1, correction_2),
@@ -354,8 +363,9 @@ def _simplex_log_newton_4_from_logs(
     initial_log_z: torch.Tensor,
     previous_lambda: torch.Tensor,
     initialized: torch.Tensor,
+    mu0: float = 0.03,
 ):
-    """Apply four jointly compiled safeguarded log-Newton corrections."""
+    """Apply four jointly compiled condition-aware log-Newton corrections."""
     if (
         log_a.shape != log_b.shape
         or log_a.shape != initial_log_z.shape
@@ -367,6 +377,8 @@ def _simplex_log_newton_4_from_logs(
         raise ValueError(f"previous_lambda must have shape {expected_state_shape}")
     if initialized.shape != expected_state_shape:
         raise ValueError(f"initialized must have shape {expected_state_shape}")
+    if not math.isfinite(mu0) or not 0 <= mu0 <= 1:
+        raise ValueError("mu0 must be finite and lie in [0, 1]")
 
     kernel = (
         _compiled_simplex_log_newton_4_core
@@ -379,6 +391,7 @@ def _simplex_log_newton_4_from_logs(
         initial_log_z,
         previous_lambda,
         initialized,
+        mu0,
     )
     # reduce-overhead uses CUDA Graphs, whose output buffers are reused by the
     # next invocation with the same graph. MM calls this kernel repeatedly for
@@ -414,12 +427,20 @@ class DLightSBMM(DLightSB):
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Each simplex multiplier gets four jointly compiled safeguarded
-    log-Newton corrections warm-started from the preceding MM step. No explicit
-    regularization is added.
+    statistics. Each simplex multiplier gets four jointly compiled corrections
+    warm-started from the preceding MM step. Well-conditioned rows use Newton;
+    flat rows with a large proposed move use a monotone fixed-point correction.
+    No explicit regularization is added.
     """
 
-    def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        inner_sweeps=1,
+        tol=None,
+        log_newton_mu0=0.03,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if self.hparams.entropy_lambda != 0 or self.hparams.scheduler is not None:
             raise ValueError("MM requires entropy_lambda=0 and scheduler=None")
@@ -427,7 +448,9 @@ class DLightSBMM(DLightSB):
             raise ValueError("inner_sweeps must be a positive integer")
         if tol is not None and (not math.isfinite(tol) or tol < 0):
             raise ValueError("tol must be None or a finite nonnegative number")
-        self.save_hyperparameters("inner_sweeps", "tol")
+        if not math.isfinite(log_newton_mu0) or not 0 <= log_newton_mu0 <= 1:
+            raise ValueError("log_newton_mu0 must be finite and lie in [0, 1]")
+        self.save_hyperparameters("inner_sweeps", "tol", "log_newton_mu0")
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
         self.requires_grad_(False)
@@ -484,6 +507,7 @@ class DLightSBMM(DLightSB):
             current_log_z,
             previous_lambda,
             initialized,
+            self.hparams.log_newton_mu0,
         )
         if squeeze:
             result["log_z"] = result["log_z"].squeeze(0)
