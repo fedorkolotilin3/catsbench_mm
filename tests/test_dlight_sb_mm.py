@@ -109,13 +109,14 @@ class DLightSBMMUpdateTest(unittest.TestCase):
         model.init_weights()
         return model
 
-    def test_mm_step_is_monotone_without_simplex_projection(self):
+    def test_mm_step_is_monotone_and_keeps_beta_fixed(self):
         torch.manual_seed(0)
         model = self._make_model()
         with torch.no_grad():
-            # A global scale is a valid unnormalized representation. The old
-            # simplex implementation erased it by forcing sum(beta) == 1.
+            # Fixed beta must preserve arbitrary valid unnormalized weights.
             model.log_alpha.add_(10.0)
+        initial_beta = model.log_alpha.detach().clone()
+        initial_cores = model.log_cp_cores.detach().clone()
 
         x0 = torch.tensor(
             [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1],
@@ -132,9 +133,10 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             info = model.mm_step(x0, x1)
             self.assertLessEqual(info["loss"], info["loss_before"] + 1e-10)
             self.assertGreaterEqual(info["surrogate_decrease"], -1e-10)
+            self.assertEqual(info["beta_change_max"], 0.0)
 
-        self.assertFalse(torch.isnan(model.log_alpha).any())
-        self.assertFalse(torch.isposinf(model.log_alpha).any())
+        self.assertTrue(torch.equal(model.log_alpha, initial_beta))
+        self.assertFalse(torch.equal(model.log_cp_cores, initial_cores))
         self.assertGreater(torch.logsumexp(model.log_alpha, dim=0).item(), 1.0)
 
     def test_unobserved_target_category_preserves_support(self):

@@ -1,4 +1,4 @@
-"""Block-MM for the unregularized DLightSB loss (see theory.md).
+"""Block-MM for the unregularized DLightSB loss with fixed beta weights.
 
 Usage:
     solver = DLightSBMM.from_model(model, state_dict=initial_state)
@@ -87,14 +87,17 @@ class _MMOptimizer(torch.optim.Optimizer):
 
 
 class DLightSBMM(DLightSB):
-    """DLightSB with one analytic block-MM sweep per Lightning training_step.
+    """DLightSB with fixed beta and one analytic core-MM sweep per step.
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
-    beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Parameters are constrained only to be nonnegative; each block
-    uses the explicit minimizer ``z = b / a`` for positive sufficient
-    statistics and preserves coordinates with zero stochastic-batch counts.
+    The beta weights stay exactly at their initialized or checkpoint values.
+    Dimensions are updated sequentially with fixed E-step statistics.
+    Parameters are constrained only to be nonnegative; each core block uses
+    the explicit minimizer ``z = b / a`` for positive sufficient statistics
+    and preserves coordinates with zero stochastic-batch counts.
     """
+
+    fix_beta = True
 
     def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -251,6 +254,7 @@ class DLightSBMM(DLightSB):
         # A value of -inf is an exact zero and is allowed by the MM domain.
         log_r = self.log_cp_cores.detach().clone()
         log_beta = self.log_alpha.detach().clone()
+        beta_before = log_beta.clone()
         invalid_log_r = torch.isnan(log_r).any() or torch.isposinf(log_r).any()
         invalid_log_beta = torch.isnan(log_beta).any() or torch.isposinf(log_beta).any()
         if invalid_log_r or invalid_log_beta or not torch.isfinite(log_beta).any():
@@ -314,11 +318,13 @@ class DLightSBMM(DLightSB):
 
         bound_before = surrogate().item()
         for _ in range(inner_sweeps):
-            log_product = log_u.sum(dim=0)
-            log_a = torch.logsumexp(
-                log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
-            )
-            log_beta = self._update_block(log_a, log_n, log_beta)
+            if not self.fix_beta:
+                log_product = log_u.sum(dim=0)
+                log_a = torch.logsumexp(
+                    log_weight0[:, None] + log_product - old_log_c[:, None],
+                    dim=0,
+                )
+                log_beta = self._update_block(log_a, log_n, log_beta)
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -358,5 +364,10 @@ class DLightSBMM(DLightSB):
 
         self.log_alpha.copy_(log_beta)
         self.log_cp_cores.copy_(log_r)
+        beta_change_max = (
+            0.0 if self.fix_beta
+            else (log_beta - beta_before).abs().amax().item()
+        )
         return {"loss": new_loss, "loss_before": previous_loss,
-                "surrogate_decrease": bound_before - bound_after}
+                "surrogate_decrease": bound_before - bound_after,
+                "beta_change_max": beta_change_max}
