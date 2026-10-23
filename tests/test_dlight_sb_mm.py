@@ -253,17 +253,16 @@ class SimplexLogNewtonStepTest(unittest.TestCase):
             torch.ones(2, dtype=log_a.dtype),
         )
 
-    def test_flat_far_equation_uses_monotone_fixed_point_correction(self):
+    def test_large_newton_step_uses_monotone_fixed_point_correction(self):
         dtype = torch.float64
-        shifted = torch.tensor([[0.0, 1e6]], dtype=dtype)
-        target_z = torch.tensor([[1e-8, 1 - 1e-8]], dtype=dtype)
-        b = target_z * (shifted + 1)
+        shifted = torch.tensor([[0.0, 1.0]], dtype=dtype)
+        b = torch.tensor([[0.1, 1.0]], dtype=dtype)
         log_shifted = torch.where(
             shifted > 0,
             shifted.log(),
             torch.full_like(shifted, -torch.inf),
         )
-        log_delta = torch.tensor([[-10.0]], dtype=dtype)
+        log_delta = torch.tensor([[0.01]], dtype=dtype).log()
         log_denominator = torch.logaddexp(log_shifted, log_delta)
         log_mass = torch.logsumexp(b.log() - log_denominator, dim=1, keepdim=True)
         log_second_sum = torch.logsumexp(
@@ -272,8 +271,9 @@ class SimplexLogNewtonStepTest(unittest.TestCase):
             keepdim=True,
         )
         mu = (log_delta + log_second_sum - log_mass).exp()
-        self.assertLess(mu.item(), 0.03)
-        self.assertGreater(log_mass.abs().item(), mu.item())
+        newton_correction = log_mass / mu
+        self.assertGreater(mu.item(), 0.03)
+        self.assertGreater(newton_correction.abs().item(), 1.0)
 
         updated, correction = _log_newton_iteration(
             log_delta,
@@ -281,13 +281,13 @@ class SimplexLogNewtonStepTest(unittest.TestCase):
             log_shifted,
             torch.full_like(log_delta, -torch.inf),
             torch.full_like(log_delta, torch.inf),
-            0.03,
+            1.0,
         )
 
         torch.testing.assert_close(updated, log_delta + log_mass)
         torch.testing.assert_close(correction, log_mass.abs())
 
-    def test_flat_near_equation_keeps_newton_correction(self):
+    def test_bounded_newton_step_keeps_newton_correction(self):
         dtype = torch.float64
         shifted = torch.tensor([[0.0, 1e6]], dtype=dtype)
         target_z = torch.tensor([[1e-8, 1 - 1e-8]], dtype=dtype)
@@ -307,8 +307,7 @@ class SimplexLogNewtonStepTest(unittest.TestCase):
         )
         mu = (log_delta + log_second_sum - log_mass).exp()
         expected_correction = log_mass / mu
-        self.assertLess(mu.item(), 0.03)
-        self.assertLessEqual(log_mass.abs().item(), mu.item())
+        self.assertLessEqual(expected_correction.abs().item(), 1.0)
 
         updated, correction = _log_newton_iteration(
             log_delta,
@@ -316,7 +315,7 @@ class SimplexLogNewtonStepTest(unittest.TestCase):
             log_shifted,
             torch.full_like(log_delta, -torch.inf),
             torch.full_like(log_delta, torch.inf),
-            0.03,
+            1.0,
         )
 
         torch.testing.assert_close(updated, log_delta + expected_correction)
