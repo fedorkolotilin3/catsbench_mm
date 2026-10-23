@@ -373,13 +373,18 @@ def _simplex_log_newton_4_from_logs(
         if log_a.is_cuda
         else _simplex_log_newton_4_core
     )
-    return kernel(
+    result = kernel(
         log_a,
         log_b,
         initial_log_z,
         previous_lambda,
         initialized,
     )
+    # reduce-overhead uses CUDA Graphs, whose output buffers are reused by the
+    # next invocation with the same graph. MM calls this kernel repeatedly for
+    # different blocks before all preceding outputs have been consumed, so
+    # materialize independent eager tensors at the compiled boundary.
+    return {name: value.clone() for name, value in result.items()}
 
 
 @torch.no_grad()
