@@ -36,13 +36,11 @@ def _support_preserving_update_from_logs(
     """Apply a support-preserving MM update to ``a*z - b*log(z)``.
 
     The explicit solution is ``z = b / a`` when both coefficients are
-    positive. Inputs and the result stay in the log domain. If ``b = 0``, the
-    current value is preserved instead of taking the boundary minimizer zero.
-    This leaves that coordinate's surrogate contribution unchanged and keeps
-    support for categories that may occur in later stochastic batches. If all
-    ``b`` coefficients in a block are zero, the complete block is therefore
-    left unchanged. The remaining case, ``a = 0 < b``, has no finite
-    minimizer.
+    positive, clipped to ``z >= min_component_value``. Inputs and the result
+    stay in the log domain. If ``b = 0``, the current value is preserved but
+    lifted to the floor when necessary. This keeps support for categories that
+    may occur in later stochastic batches. The remaining case, ``a = 0 < b``,
+    still has no finite minimizer and is rejected explicitly.
     """
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
         raise ValueError("log_a, log_b and current_log_z must have the same shape")
@@ -95,8 +93,8 @@ class DLightSBMM(DLightSB):
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Parameters are constrained only to be nonnegative; each block
-    uses the explicit minimizer ``z = b / a`` for positive sufficient
+    statistics. Every parameter is bounded below by ``min_component_value``.
+    Each block uses the constrained minimizer for positive sufficient
     statistics and preserves coordinates with zero stochastic-batch counts.
     """
 

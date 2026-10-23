@@ -55,7 +55,9 @@ class DLightSBMMRegularized(DLightSBMM):
     weights. ``regularization_lambda_cores`` multiplies the mean penalty over
     all categorical core parameters. Zero coefficients restore the original
     MM update for the corresponding block. Loss and stopping refer to the
-    regularized objective; data_loss and regularization are logged separately.
+    regularized objective; the scalar minimizer is clipped to the configured
+    positive component floor. Data loss and regularization are logged
+    separately.
     """
 
     def __init__(
