@@ -92,6 +92,19 @@ class NonnegativeBlockMinimumTest(unittest.TestCase):
         expected = torch.full_like(result, math.log(floor))
         torch.testing.assert_close(result, expected)
 
+    def test_floor_must_be_finite_and_positive(self):
+        value = torch.zeros(1, dtype=torch.float64)
+        for invalid in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "min_component_value"
+            ):
+                _support_preserving_update_from_logs(
+                    value,
+                    value,
+                    value,
+                    invalid,
+                )
+
 
 class DLightSBMMUpdateTest(unittest.TestCase):
     def _make_model(self) -> DLightSBMM:
