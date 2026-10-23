@@ -47,6 +47,20 @@ u_{\mathrm{new}}=\log(b+\lambda)-\log(a+\lambda)
 При нулевой статистике координата остаётся строго положительной
 Исходные параметры должны быть строго положительными
 
+## Клиппинг обновлений
+
+Параметр `clip_updates` включает ограничение снизу через `min_component_value`
+
+В `mm_regularized` клиппинг по умолчанию отключён
+
+При `clip_updates=false` используется точный аналитический минимум без floor
+
+Для включения прежнего поведения используйте
+
+```bash
+python -m src.run experiment=mm_regularized/benchmark_hd/d16_g002 method.clip_updates=true
+```
+
 ## Гарантия убывания
 
 Штраф одинаков в целевой функции и мажоранте поэтому касание сохраняется
@@ -88,6 +102,7 @@ from src.methods.mm_regularized import DLightSBMMRegularized
 solver = DLightSBMMRegularized.from_model(
     model,
     regularization_lambda=0.0001,
+    clip_updates=False,
 )
 ```
 

@@ -54,6 +54,17 @@ class ExponentialLogBlockTest(unittest.TestCase):
         )
         self.assertAlmostEqual(actual.item(), math.log(1e-12))
 
+    def test_regularized_update_can_disable_positive_floor(self):
+        actual = _exponential_log_update(
+            torch.tensor([1000.0], dtype=torch.float64),
+            torch.tensor([-1000.0], dtype=torch.float64),
+            torch.tensor([0.0], dtype=torch.float64),
+            0.03,
+            1e-12,
+            clip_updates=False,
+        )
+        self.assertLess(actual.item(), math.log(1e-12))
+
 
 class RegularizedMMTest(unittest.TestCase):
     def setUp(self):
@@ -69,8 +80,12 @@ class RegularizedMMTest(unittest.TestCase):
                 torch.tensor([[0, 0], [1, 1], [0, 1]], dtype=torch.long))
 
     def test_zero_strength_matches_original_including_missing_categories(self):
-        base = existing.DLightSBMMUpdateTest()._make_model()
-        model = DLightSBMMRegularized.from_model(base, regularization_lambda=0.)
+        base = existing.DLightSBMMUpdateTest()._make_model(clip_updates=False)
+        model = DLightSBMMRegularized.from_model(
+            base,
+            regularization_lambda=0.,
+            clip_updates=False,
+        )
         for _ in range(3):
             original = base.mm_step(*self.data())
             actual = model.mm_step(*self.data())
@@ -115,7 +130,9 @@ class RegularizedMMTest(unittest.TestCase):
     def test_lightning_checkpoint_preserves_penalty_and_resume(self):
         model = self.make_model(.02)
         loader = DataLoader(TensorDataset(*self.data()), batch_size=3)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(
+            dir=Path(__file__).resolve().parent
+        ) as directory:
             trainer = Trainer(accelerator="cpu", max_steps=2, max_epochs=2,
                               logger=False, enable_checkpointing=False,
                               enable_progress_bar=False, enable_model_summary=False,
@@ -129,6 +146,7 @@ class RegularizedMMTest(unittest.TestCase):
                 checkpoint, prior=model.prior, optimizer=None, weights_only=False
             )
             self.assertEqual(restored.hparams.regularization_lambda, .02)
+            self.assertFalse(restored.hparams.clip_updates)
             self.assertTrue(all(not p.requires_grad for p in restored.parameters()))
             torch.testing.assert_close(restored.log_alpha, model.log_alpha)
             info = restored.mm_step(*self.data())
@@ -144,6 +162,8 @@ class RegularizedMMTest(unittest.TestCase):
                 self.assertEqual(cfg.method._target_, "src.methods.mm_regularized.DLightSBMMRegularized")
                 self.assertEqual(cfg.method.regularization_lambda, .0001)
                 self.assertEqual(cfg.method.min_component_value, 1e-12)
+                self.assertTrue(base.method.clip_updates)
+                self.assertFalse(cfg.method.clip_updates)
                 self.assertEqual(cfg.data, base.data)
                 self.assertEqual(cfg.trainer, base.trainer)
 

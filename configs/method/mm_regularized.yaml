@@ -4,6 +4,9 @@ defaults:
 
 _target_: src.methods.mm_regularized.DLightSBMMRegularized
 
+# Use the exact regularized minimizer without a positive floor by default.
+clip_updates: false
+
 # Coefficient of SUM(exp(u) - u - 1) over all log parameters u.
 # This is not numerically equivalent to AdamW weight_decay.
 regularization_lambda: 0.0001

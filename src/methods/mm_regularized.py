@@ -18,10 +18,13 @@ def _exponential_log_update(
     current_log_z,
     strength,
     min_component_value=1e-12,
+    clip_updates=True,
 ):
     """Minimize (a+lambda)*exp(u) - (b+lambda)*u without root finding."""
     if not math.isfinite(strength) or strength <= 0:
         raise ValueError("strength must be finite and positive")
+    if not isinstance(clip_updates, bool):
+        raise ValueError("clip_updates must be a boolean")
     if not math.isfinite(min_component_value) or min_component_value <= 0:
         raise ValueError("min_component_value must be finite and positive")
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
@@ -33,7 +36,8 @@ def _exponential_log_update(
             raise ValueError("Log coefficients must be finite or -inf")
     log_strength = log_a.new_tensor(math.log(strength))
     result = torch.logaddexp(log_b, log_strength) - torch.logaddexp(log_a, log_strength)
-    result = result.clamp_min(math.log(min_component_value))
+    if clip_updates:
+        result = result.clamp_min(math.log(min_component_value))
     if not torch.isfinite(result).all():
         raise FloatingPointError("Non-finite regularized block minimizer")
     return result
@@ -54,15 +58,21 @@ class DLightSBMMRegularized(DLightSBMM):
     The penalty is a sum, not a mean. Lambda=0 restores the original MM,
     including support preservation for zero batch counts. For lambda>0 all
     initial log parameters must be finite. Loss and stopping refer to the
-    regularized objective; the scalar minimizer is clipped to the configured
-    positive component floor. Data loss and regularization are logged
-    separately.
+    regularized objective. The scalar minimizer is clipped to the configured
+    positive component floor only when ``clip_updates`` is enabled. Data loss
+    and regularization are logged separately.
     """
 
-    def __init__(self, *args, regularization_lambda=0.0001, **kwargs):
+    def __init__(
+        self,
+        *args,
+        regularization_lambda=0.0001,
+        clip_updates=False,
+        **kwargs,
+    ):
         if not math.isfinite(regularization_lambda) or regularization_lambda < 0:
             raise ValueError("regularization_lambda must be finite and nonnegative")
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, clip_updates=clip_updates, **kwargs)
         self.save_hyperparameters("regularization_lambda")
 
     @torch.no_grad()
@@ -84,6 +94,7 @@ class DLightSBMMRegularized(DLightSBMM):
             current_log_z,
             self.hparams.regularization_lambda,
             self.hparams.min_component_value,
+            self.hparams.clip_updates,
         )
 
     @torch.no_grad()
