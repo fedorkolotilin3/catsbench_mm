@@ -49,12 +49,12 @@ logger:
 
 trainer:
   precision: 32-true
-  max_epochs: 1000
-  max_steps: 1000
+  max_epochs: 300
+  max_steps: 300
   log_every_n_steps: 1
   limit_train_batches: 1.0
   val_check_interval: null
-  check_val_every_n_epoch: 100
+  check_val_every_n_epoch: 5
   num_sanity_val_steps: 3
   limit_val_batches: 1.0
   accumulate_grad_batches: 1

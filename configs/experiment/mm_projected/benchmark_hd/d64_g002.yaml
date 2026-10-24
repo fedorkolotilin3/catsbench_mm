@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - /experiment/dlight_sb_mm/benchmark_hd/d64_g002
+  - _self_
+
+experiment_description: Ordinary unregularized MM with post-step simplex reparameterization on d64
+
+method:
+  project_to_simplex_after_step: true

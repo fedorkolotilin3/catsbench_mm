@@ -13,3 +13,14 @@ entropy_warmup_steps: 20000
 entropy_lambda: 0
 sample_prob: 0.99
 tau: 1.0
+# Positive floor used when clipping analytic MM block updates.
+min_component_value: 1.0e-12
+# Apply min_component_value to analytic MM updates.
+clip_updates: true
+# Separate normalized exponential penalties. Zero values are ordinary MM.
+regularization_lambda_alpha: 0.0
+regularization_lambda_cores: 0.0
+# Reparameterize ordinary unregularized MM onto beta/core simplexes after a step.
+project_to_simplex_after_step: false
+# Compile pure CUDA tensor kernels while keeping eager CPU fallbacks.
+compile_update_kernels: true

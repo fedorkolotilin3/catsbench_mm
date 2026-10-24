@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -80,9 +81,54 @@ class NonnegativeBlockMinimumTest(unittest.TestCase):
                 torch.tensor([0.0], dtype=torch.float64),
             )
 
+    def test_update_respects_positive_floor(self):
+        floor = 1e-12
+        result = _support_preserving_update_from_logs(
+            torch.tensor([100.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            floor,
+        )
+        expected = torch.full_like(result, math.log(floor))
+        torch.testing.assert_close(result, expected)
+
+    def test_update_can_disable_positive_floor(self):
+        result = _support_preserving_update_from_logs(
+            torch.tensor([100.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            torch.tensor([0.0, -torch.inf], dtype=torch.float64),
+            1e-12,
+            clip_updates=False,
+        )
+        self.assertEqual(result[0].item(), -100.0)
+        self.assertTrue(torch.isneginf(result[1]))
+
+    def test_floor_must_be_finite_and_positive(self):
+        value = torch.zeros(1, dtype=torch.float64)
+        for invalid in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "min_component_value"
+            ):
+                _support_preserving_update_from_logs(
+                    value,
+                    value,
+                    value,
+                    invalid,
+                )
+
+    def test_clip_updates_must_be_boolean(self):
+        value = torch.zeros(1, dtype=torch.float64)
+        with self.assertRaisesRegex(ValueError, "clip_updates"):
+            _support_preserving_update_from_logs(
+                value,
+                value,
+                value,
+                clip_updates=1,
+            )
+
 
 class DLightSBMMUpdateTest(unittest.TestCase):
-    def _make_model(self) -> DLightSBMM:
+    def _make_model(self, **kwargs) -> DLightSBMM:
         prior = Prior(
             alpha=0.1,
             num_categories=3,
@@ -105,6 +151,7 @@ class DLightSBMMUpdateTest(unittest.TestCase):
             entropy_warmup_steps=1,
             sample_prob=0.9,
             tau=1.0,
+            **kwargs,
         )
         model.init_weights()
         return model

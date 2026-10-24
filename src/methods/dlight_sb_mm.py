@@ -26,49 +26,240 @@ from catsbench.utils import lse_matmul
 from .dlight_sb import DLightSB
 
 
+def _support_preserving_update_core(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    current_log_z: torch.Tensor,
+    log_floor: float,
+    clip_updates: bool,
+) -> torch.Tensor:
+    """Tensor-only ordinary MM block kernel suitable for ``torch.compile``."""
+    positive_a = torch.isfinite(log_a)
+    positive_b = torch.isfinite(log_b)
+    interior = positive_a & positive_b
+    interior_log_z = log_b - log_a
+    log_z = current_log_z
+    if clip_updates:
+        log_z = log_z.clamp_min(log_floor)
+        interior_log_z = interior_log_z.clamp_min(log_floor)
+    return torch.where(interior, interior_log_z, log_z)
+
+
+_compiled_support_preserving_update_core = torch.compile(
+    _support_preserving_update_core,
+    fullgraph=True,
+    dynamic=False,
+    mode="reduce-overhead",
+)
+
+
 @torch.no_grad()
 def _support_preserving_update_from_logs(
     log_a: torch.Tensor,
     log_b: torch.Tensor,
     current_log_z: torch.Tensor,
+    min_component_value: float = 1e-12,
+    clip_updates: bool = True,
+    compile_kernel: bool = True,
 ) -> torch.Tensor:
     """Apply a support-preserving MM update to ``a*z - b*log(z)``.
 
     The explicit solution is ``z = b / a`` when both coefficients are
-    positive. Inputs and the result stay in the log domain. If ``b = 0``, the
-    current value is preserved instead of taking the boundary minimizer zero.
-    This leaves that coordinate's surrogate contribution unchanged and keeps
-    support for categories that may occur in later stochastic batches. If all
-    ``b`` coefficients in a block are zero, the complete block is therefore
-    left unchanged. The remaining case, ``a = 0 < b``, has no finite
-    minimizer.
+    positive. When ``clip_updates`` is enabled, the result is clipped to
+    ``z >= min_component_value``. Inputs and the result stay in the log domain.
+    If ``b = 0``, the current value is preserved, with the optional floor
+    applied. This keeps support for categories that may occur in later
+    stochastic batches. The remaining case, ``a = 0 < b``, still has no finite
+    minimizer and is rejected explicitly.
     """
     if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
         raise ValueError("log_a, log_b and current_log_z must have the same shape")
-    for value in (log_a, log_b, current_log_z):
-        if torch.isnan(value).any() or torch.isposinf(value).any():
-            raise ValueError("Log parameters may contain finite values and -inf only")
+    if not isinstance(clip_updates, bool):
+        raise ValueError("clip_updates must be a boolean")
+    if not math.isfinite(min_component_value) or min_component_value <= 0:
+        raise ValueError("min_component_value must be finite and positive")
+    if not isinstance(compile_kernel, bool):
+        raise ValueError("compile_kernel must be a boolean")
+    # Python truth conversion synchronizes CUDA. The final candidate check is
+    # the single synchronization point for CUDA, while CPU keeps rich errors.
+    if not log_a.is_cuda:
+        for value in (log_a, log_b, current_log_z):
+            if torch.isnan(value).any() or torch.isposinf(value).any():
+                raise ValueError("Log parameters may contain finite values and -inf only")
+        positive_a = torch.isfinite(log_a)
+        positive_b = torch.isfinite(log_b)
+        if ((~positive_a) & positive_b).any():
+            raise FloatingPointError(
+                "The nonnegative MM block is unbounded: a=0 and b>0"
+            )
 
-    positive_a = torch.isfinite(log_a)
-    positive_b = torch.isfinite(log_b)
-    if ((~positive_a) & positive_b).any():
-        raise FloatingPointError(
-            "The nonnegative MM block is unbounded: a=0 and b>0"
-        )
+    kernel = (
+        _compiled_support_preserving_update_core
+        if compile_kernel and log_a.is_cuda
+        else _support_preserving_update_core
+    )
+    result = kernel(
+        log_a,
+        log_b,
+        current_log_z,
+        math.log(min_component_value),
+        clip_updates,
+    )
+    # reduce-overhead may reuse CUDA Graph output buffers across block calls.
+    return result.clone() if compile_kernel and log_a.is_cuda else result
 
-    log_z = current_log_z.clone()
-    interior = positive_a & positive_b
-    log_z = torch.where(interior, log_b - log_a, log_z)
-    if torch.isnan(log_z).any() or torch.isposinf(log_z).any():
-        raise FloatingPointError("Non-finite support-preserving MM block update")
-    return log_z
+
+def _exponential_log_update_core(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    log_strength: torch.Tensor,
+    log_floor: float,
+    clip_updates: bool,
+) -> torch.Tensor:
+    result = torch.logaddexp(log_b, log_strength) - torch.logaddexp(
+        log_a, log_strength
+    )
+    return result.clamp_min(log_floor) if clip_updates else result
+
+
+_compiled_exponential_log_update_core = torch.compile(
+    _exponential_log_update_core,
+    fullgraph=True,
+    dynamic=False,
+    mode="reduce-overhead",
+)
+
+
+@torch.no_grad()
+def _exponential_log_update(
+    log_a: torch.Tensor,
+    log_b: torch.Tensor,
+    current_log_z: torch.Tensor,
+    strength: float,
+    min_component_value: float = 1e-12,
+    clip_updates: bool = True,
+    compile_kernel: bool = True,
+) -> torch.Tensor:
+    """Minimize the normalized exponential-regularized scalar MM bound."""
+    if not math.isfinite(strength) or strength <= 0:
+        raise ValueError("strength must be finite and positive")
+    if not isinstance(clip_updates, bool):
+        raise ValueError("clip_updates must be a boolean")
+    if not isinstance(compile_kernel, bool):
+        raise ValueError("compile_kernel must be a boolean")
+    if not math.isfinite(min_component_value) or min_component_value <= 0:
+        raise ValueError("min_component_value must be finite and positive")
+    if log_a.shape != log_b.shape or log_a.shape != current_log_z.shape:
+        raise ValueError("Block tensors must have the same shape")
+    if not log_a.is_cuda:
+        if not torch.isfinite(current_log_z).all():
+            raise ValueError("Log regularization requires strictly positive parameters")
+        for value in (log_a, log_b):
+            if torch.isnan(value).any() or torch.isposinf(value).any():
+                raise ValueError("Log coefficients must be finite or -inf")
+
+    log_strength = log_a.new_tensor(math.log(strength))
+    kernel = (
+        _compiled_exponential_log_update_core
+        if compile_kernel and log_a.is_cuda
+        else _exponential_log_update_core
+    )
+    result = kernel(
+        log_a,
+        log_b,
+        log_strength,
+        math.log(min_component_value),
+        clip_updates,
+    )
+    return result.clone() if compile_kernel and log_a.is_cuda else result
+
+
+@torch.no_grad()
+def _exponential_log_penalty(u: torch.Tensor) -> torch.Tensor:
+    """Evaluate ``exp(u) - u - 1`` accurately near zero."""
+    small = u.abs() < 1e-3
+    local = torch.where(small, u, 0.0)
+    series = local.square() * (0.5 + local / 6 + local.square() / 24)
+    return torch.where(small, series, torch.expm1(u) - u)
+
+
+@torch.no_grad()
+def _project_potentials_to_simplex(
+    log_beta: torch.Tensor,
+    log_r: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize all cores and beta while preserving the potential up to scale."""
+    if log_beta.ndim != 1 or log_r.ndim != 3:
+        raise ValueError("Expected log_beta [K] and log_r [D, S, K]")
+    if log_r.shape[-1] != log_beta.shape[0]:
+        raise ValueError("Beta and core component counts must match")
+    if not log_beta.is_cuda:
+        for value in (log_beta, log_r):
+            if torch.isnan(value).any() or torch.isposinf(value).any():
+                raise ValueError("Log parameters may contain finite values and -inf only")
+
+    log_core_mass = torch.logsumexp(log_r, dim=1)
+    projected_log_r = log_r - log_core_mass[:, None, :]
+    compensated_log_beta = log_beta + log_core_mass.sum(dim=0)
+    projected_log_beta = compensated_log_beta - torch.logsumexp(
+        compensated_log_beta, dim=0
+    )
+    return projected_log_beta, projected_log_r
+
+
+def _grouped_logsumexp_core(
+    log_values: torch.Tensor,
+    groups: torch.Tensor,
+    num_groups: int,
+) -> torch.Tensor:
+    """Vectorized group-wise logsumexp used for MM sufficient statistics."""
+    index = groups[:, None].expand_as(log_values)
+    maxima = log_values.new_full(
+        (num_groups, log_values.shape[1]), -torch.inf
+    )
+    maxima.scatter_reduce_(
+        0, index, log_values, reduce="amax", include_self=True
+    )
+    gathered_maxima = maxima.gather(0, index)
+    terms = torch.where(
+        torch.isfinite(log_values),
+        (log_values - gathered_maxima).exp(),
+        torch.zeros_like(log_values),
+    )
+    totals = torch.zeros_like(maxima).scatter_add_(0, index, terms)
+    return torch.where(totals > 0, maxima + totals.log(), maxima)
+
+
+_compiled_grouped_logsumexp_core = torch.compile(
+    _grouped_logsumexp_core,
+    fullgraph=True,
+    dynamic=False,
+    mode="reduce-overhead",
+)
+
+
+@torch.no_grad()
+def _grouped_logsumexp(
+    log_values: torch.Tensor,
+    groups: torch.Tensor,
+    num_groups: int,
+    compile_kernel: bool = True,
+) -> torch.Tensor:
+    if log_values.ndim != 2 or groups.ndim != 1 or len(groups) != len(log_values):
+        raise ValueError("Expected log_values [N,K] and groups [N]")
+    kernel = (
+        _compiled_grouped_logsumexp_core
+        if compile_kernel and log_values.is_cuda
+        else _grouped_logsumexp_core
+    )
+    result = kernel(log_values, groups, num_groups)
+    return result.clone() if compile_kernel and log_values.is_cuda else result
 
 
 @torch.no_grad()
 def _logsumexp_matmul(log_a: torch.Tensor, log_b: torch.Tensor) -> torch.Tensor:
     """Use the shared Triton LSE kernel on CUDA and its CPU reference fallback."""
     return lse_matmul(log_a, log_b, implementation="triton")
-
 
 class _MMOptimizer(torch.optim.Optimizer):
     """Execute an analytic update through Lightning's optimizer bookkeeping.
@@ -88,16 +279,29 @@ class _MMOptimizer(torch.optim.Optimizer):
 
 
 class DLightSBMM(DLightSB):
-    """DLightSB with one analytic block-MM sweep per Lightning training_step.
+    """Configurable ordinary block-MM for the DLightSB objective.
 
     The bound uses the tangent to log(c) and Jensen for -log(v).
     beta is updated first, then dimensions sequentially, with fixed E-step
-    statistics. Parameters are constrained only to be nonnegative; each block
-    uses the explicit minimizer ``z = b / a`` for positive sufficient
-    statistics and preserves coordinates with zero stochastic-batch counts.
+    statistics. Separate normalized exponential penalties can be applied to
+    alpha and cores. Zero coefficients recover ordinary unregularized MM.
+    Clipping, compiled block kernels and an optional post-step simplex
+    reparameterization are controlled by configuration.
     """
 
-    def __init__(self, *args, inner_sweeps=1, tol=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        inner_sweeps=1,
+        tol=None,
+        min_component_value=1e-12,
+        clip_updates=True,
+        regularization_lambda_alpha=0.0,
+        regularization_lambda_cores=0.0,
+        project_to_simplex_after_step=False,
+        compile_update_kernels=True,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if self.hparams.entropy_lambda != 0 or self.hparams.scheduler is not None:
             raise ValueError("MM requires entropy_lambda=0 and scheduler=None")
@@ -105,26 +309,96 @@ class DLightSBMM(DLightSB):
             raise ValueError("inner_sweeps must be a positive integer")
         if tol is not None and (not math.isfinite(tol) or tol < 0):
             raise ValueError("tol must be None or a finite nonnegative number")
-        self.save_hyperparameters("inner_sweeps", "tol")
+        if not math.isfinite(min_component_value) or min_component_value <= 0:
+            raise ValueError("min_component_value must be finite and positive")
+        if not isinstance(clip_updates, bool):
+            raise ValueError("clip_updates must be a boolean")
+        coefficients = {
+            "regularization_lambda_alpha": regularization_lambda_alpha,
+            "regularization_lambda_cores": regularization_lambda_cores,
+        }
+        for name, value in coefficients.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not isinstance(project_to_simplex_after_step, bool):
+            raise ValueError("project_to_simplex_after_step must be a boolean")
+        if not isinstance(compile_update_kernels, bool):
+            raise ValueError("compile_update_kernels must be a boolean")
+        if project_to_simplex_after_step and any(coefficients.values()):
+            raise ValueError(
+                "Post-step simplex projection is valid only with zero regularization"
+            )
+        self.save_hyperparameters(
+            "inner_sweeps",
+            "tol",
+            "min_component_value",
+            "clip_updates",
+            "regularization_lambda_alpha",
+            "regularization_lambda_cores",
+            "project_to_simplex_after_step",
+            "compile_update_kernels",
+        )
         self.automatic_optimization = False
         self.to(dtype=self.prior.dtype)
-        # MM updates parameters analytically. Also keep inherited evaluation
-        # methods graph-free when called directly outside Lightning/no_grad.
         self.requires_grad_(False)
-
-    @torch.no_grad()
-    def loss(self, true_x_start, true_x_end):
-        return super().loss(true_x_start, true_x_end)
 
     def configure_optimizers(self):
         return _MMOptimizer([self.log_alpha, self.log_cp_cores])
 
-    def _update_block(self, log_a, log_b, current_log_z):
-        return _support_preserving_update_from_logs(log_a, log_b, current_log_z)
+    @torch.no_grad()
+    def _update_block(self, log_a, log_b, current_log_z, *, block):
+        if block not in {"alpha", "cores"}:
+            raise ValueError(f"Unknown MM parameter block: {block}")
+        strength = (
+            self.hparams.regularization_lambda_alpha / self.log_alpha.numel()
+            if block == "alpha"
+            else self.hparams.regularization_lambda_cores
+            / self.log_cp_cores.numel()
+        )
+        if strength > 0:
+            return _exponential_log_update(
+                log_a,
+                log_b,
+                current_log_z,
+                strength,
+                self.hparams.min_component_value,
+                self.hparams.clip_updates,
+                self.hparams.compile_update_kernels,
+            )
+        return _support_preserving_update_from_logs(
+            log_a,
+            log_b,
+            current_log_z,
+            self.hparams.min_component_value,
+            self.hparams.clip_updates,
+            self.hparams.compile_update_kernels,
+        )
 
+    @torch.no_grad()
     def _regularization(self, log_beta, log_r):
         """Same penalty is added to the objective and its touching bound."""
-        return log_beta.new_zeros(())
+        alpha_strength = self.hparams.regularization_lambda_alpha
+        cores_strength = self.hparams.regularization_lambda_cores
+        if alpha_strength == 0 and cores_strength == 0:
+            return log_beta.new_zeros(())
+        if not log_beta.is_cuda and (
+            not torch.isfinite(log_beta).all() or not torch.isfinite(log_r).all()
+        ):
+            raise ValueError("Log regularization requires strictly positive parameters")
+        return (
+            alpha_strength * _exponential_log_penalty(log_beta).mean()
+            + cores_strength * _exponential_log_penalty(log_r).mean()
+        )
+
+    @torch.no_grad()
+    def loss(self, true_x_start, true_x_end):
+        data_loss, info = super().loss(true_x_start, true_x_end)
+        penalty = self._regularization(self.log_alpha, self.log_cp_cores)
+        return data_loss + penalty, {
+            **info,
+            "data_loss": data_loss,
+            "regularization": penalty,
+        }
 
     def on_train_start(self):
         if self.dtype not in (torch.float32, torch.float64):
@@ -178,7 +452,7 @@ class DLightSBMM(DLightSB):
         keys = (
             "dim", "num_categories", "num_potentials", "num_timesteps",
             "distr_init", "entropy_warmup_steps",
-            "entropy_lambda", "sample_prob", "tau",
+            "entropy_lambda", "sample_prob", "tau", "freeze_beta",
         )
         with torch.device(model.device):
             solver = cls(
@@ -294,12 +568,17 @@ class DLightSBMM(DLightSB):
         log_gamma = target_logits().log_softmax(dim=1)
         log_weighted_gamma = log_weight1[:, None] + log_gamma
         log_n = torch.logsumexp(log_weighted_gamma, dim=0)
-        log_m = log_r.new_full((dim, categories, components), -torch.inf)
-        for d in range(dim):
-            for category in range(categories):
-                selected = log_weighted_gamma[target[:, d] == category]
-                if len(selected) > 0:
-                    log_m[d, category] = torch.logsumexp(selected, dim=0)
+        log_m = torch.stack(
+            [
+                _grouped_logsumexp(
+                    log_weighted_gamma,
+                    target[:, d],
+                    categories,
+                    self.hparams.compile_update_kernels,
+                )
+                for d in range(dim)
+            ]
+        )
 
         def surrogate():
             # Constant C_t is unnecessary when comparing this same bound.
@@ -313,13 +592,17 @@ class DLightSBMM(DLightSB):
             return (weight0 @ ratio - beta_term - core_term
                     + self._regularization(log_beta, log_r))
 
-        bound_before = surrogate().item()
+        bound_before_tensor = surrogate()
+        penalty_before_tensor = self._regularization(log_beta, log_r)
         for _ in range(inner_sweeps):
-            log_product = log_u.sum(dim=0)
-            log_a = torch.logsumexp(
-                log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
-            )
-            log_beta = self._update_block(log_a, log_n, log_beta)
+            if not self.hparams.freeze_beta:
+                log_product = log_u.sum(dim=0)
+                log_a = torch.logsumexp(
+                    log_weight0[:, None] + log_product - old_log_c[:, None], dim=0
+                )
+                log_beta = self._update_block(
+                    log_a, log_n, log_beta, block="alpha"
+                )
             for d in range(dim):
                 # Do not form sum(log_u) - log_u[d]: exact-zero components
                 # would produce -inf - -inf = NaN. Sum the other dimensions.
@@ -337,18 +620,58 @@ class DLightSBMM(DLightSB):
                     log_q[d].T, log_coefficients
                 )  # [S,K]
                 log_r[d] = self._update_block(
-                    log_b_linear.T, log_m[d].T, log_r[d].T
+                    log_b_linear.T, log_m[d].T, log_r[d].T, block="cores"
                 ).T
                 log_u[d] = _logsumexp_matmul(log_q[d], log_r[d])
 
-        bound_after, new_loss = surrogate().item(), objective().item()
-        previous_loss = initial_loss.item()
+        bound_after_tensor = surrogate()
+        candidate_loss_tensor = objective()
+        projection_delta_tensor = candidate_loss_tensor.new_zeros(())
+        simplex_beta_residual = candidate_loss_tensor.new_zeros(())
+        simplex_core_residual = candidate_loss_tensor.new_zeros(())
+        if self.hparams.project_to_simplex_after_step:
+            log_beta, log_r = _project_potentials_to_simplex(log_beta, log_r)
+            log_u = torch.stack(
+                [_logsumexp_matmul(log_q[d], log_r[d]) for d in range(dim)]
+            )
+            new_loss_tensor = objective()
+            projection_delta_tensor = new_loss_tensor - candidate_loss_tensor
+            simplex_beta_residual = log_beta.exp().sum().sub(1).abs()
+            simplex_core_residual = log_r.exp().sum(dim=1).sub(1).abs().amax()
+        else:
+            new_loss_tensor = candidate_loss_tensor
+        penalty_after_tensor = self._regularization(log_beta, log_r)
+        (
+            previous_loss,
+            bound_before,
+            bound_after,
+            candidate_loss,
+            new_loss,
+            penalty_before,
+            penalty_after,
+            projection_delta,
+            beta_residual,
+            core_residual,
+        ) = torch.stack(
+            (
+                initial_loss,
+                bound_before_tensor,
+                bound_after_tensor,
+                candidate_loss_tensor,
+                new_loss_tensor,
+                penalty_before_tensor,
+                penalty_after_tensor,
+                projection_delta_tensor,
+                simplex_beta_residual,
+                simplex_core_residual,
+            )
+        ).detach().cpu().tolist()
         scale = max(1.0, abs(previous_loss), abs(bound_before))
         allowance = 64 * torch.finfo(self.dtype).eps * scale
         if (
             not math.isfinite(bound_after) or not math.isfinite(new_loss)
             or bound_after > bound_before + allowance
-            or new_loss > previous_loss + allowance
+            or candidate_loss > previous_loss + allowance
         ):
             raise FloatingPointError(
                 f"MM step failed monotonicity: "
@@ -356,8 +679,33 @@ class DLightSBMM(DLightSB):
                 f"loss {previous_loss:.16g} -> {new_loss:.16g}; "
                 "no candidate weights committed"
             )
+        if self.hparams.project_to_simplex_after_step:
+            projection_scale = max(1.0, abs(candidate_loss), abs(new_loss))
+            projection_allowance = (
+                128 * torch.finfo(self.dtype).eps * projection_scale
+            )
+            if abs(projection_delta) > projection_allowance:
+                raise FloatingPointError(
+                    "Simplex projection changed the scale-invariant loss: "
+                    f"{candidate_loss:.16g} -> {new_loss:.16g}; "
+                    "no candidate weights committed"
+                )
 
         self.log_alpha.copy_(log_beta)
         self.log_cp_cores.copy_(log_r)
-        return {"loss": new_loss, "loss_before": previous_loss,
-                "surrogate_decrease": bound_before - bound_after}
+        info = {
+            "loss": new_loss,
+            "loss_before": previous_loss,
+            "data_loss": new_loss - penalty_after,
+            "data_loss_before": previous_loss - penalty_before,
+            "regularization": penalty_after,
+            "regularization_before": penalty_before,
+            "surrogate_decrease": bound_before - bound_after,
+        }
+        if self.hparams.project_to_simplex_after_step:
+            info.update(
+                projection_loss_delta=projection_delta,
+                simplex_beta_residual=beta_residual,
+                simplex_core_residual_max=core_residual,
+            )
+        return info

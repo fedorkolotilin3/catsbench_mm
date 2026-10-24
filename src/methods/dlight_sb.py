@@ -19,7 +19,8 @@ log = RankedLogger(__name__, rank_zero_only=True)
 
 HPARAMS = (
     'dim', 'num_categories', 'num_potentials', 'num_timesteps', 'entropy_lambda',
-    'entropy_warmup_steps', 'distr_init', 'tau', 'sample_prob', 'optimizer', 'scheduler'
+    'entropy_warmup_steps', 'distr_init', 'tau', 'sample_prob', 'optimizer',
+    'scheduler', 'freeze_beta'
 )
 
 class DLightSB(BaseMethod):
@@ -36,14 +37,18 @@ class DLightSB(BaseMethod):
         entropy_lambda: float = 1e-3,
         entropy_warmup_steps: int = 20_000,
         sample_prob: float = 0.9,
-        tau: float = 1.0
+        tau: float = 1.0,
+        freeze_beta: bool = False,
     ):
         super().__init__()
+        if not isinstance(freeze_beta, bool):
+            raise ValueError("freeze_beta must be a boolean")
         self.save_hyperparameters(*HPARAMS, logger=False)        
         self.prior = prior
         
         self.log_alpha = nn.Parameter(torch.zeros(num_potentials))
         self.log_cp_cores = nn.Parameter(torch.empty(dim, num_categories, num_potentials))
+        self.log_alpha.requires_grad_(not freeze_beta)
 
         self.bidirectional = False  
         self.iteration = 1

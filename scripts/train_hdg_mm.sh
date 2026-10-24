@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Baseline, MM, prior and benchmark share the custom CUDA kernel.
+# Share the custom CUDA kernel with baseline and benchmark evaluation.
 export LSE_BACKEND=triton
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"

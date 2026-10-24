@@ -1,0 +1,14 @@
+defaults:
+  - dlight_sb_mm
+  - _self_
+
+_target_: src.methods.dlight_sb_mm_simplex.DLightSBMMSimplex
+
+regularization_lambda_alpha: 0.0
+regularization_lambda_cores: 0.0
+clip_updates: false
+project_to_simplex_after_step: false
+
+# Stable fixed-step log-domain simplex solver
+bisection_steps: 32
+compile_simplex_solver: true

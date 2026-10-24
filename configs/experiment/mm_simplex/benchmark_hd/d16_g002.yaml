@@ -1,0 +1,8 @@
+# @package _global_
+
+defaults:
+  - /experiment/dlight_sb_mm/benchmark_hd/d16_g002
+  - override /method: dlight_sb_mm_simplex
+  - _self_
+
+experiment_description: Simplex-constrained MM with compiled log-bisection on benchmark_hd d16

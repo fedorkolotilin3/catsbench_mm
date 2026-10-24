@@ -2,8 +2,12 @@ defaults:
   - dlight_sb_mm
   - _self_
 
-_target_: src.methods.mm_regularized.DLightSBMMRegularized
+_target_: src.methods.dlight_sb_mm.DLightSBMM
 
-# Coefficient of SUM(exp(u) - u - 1) over all log parameters u.
-# This is not numerically equivalent to AdamW weight_decay.
-regularization_lambda: 0.0001
+# Use the exact regularized minimizer without a positive floor by default.
+clip_updates: false
+
+# Separate coefficients for mean(exp(u) - u - 1) over mixture weights and
+# categorical core parameters. These are not AdamW weight_decay values.
+regularization_lambda_alpha: 0.01
+regularization_lambda_cores: 0.5
