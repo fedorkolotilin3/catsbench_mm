@@ -166,6 +166,7 @@ class UnifiedConfigurationTest(unittest.TestCase):
         configs = str(ROOT / "configs")
         families = {
             "dlight_sb": "src.methods.dlight_sb.DLightSB",
+            "dlight_sb_sgd": "src.methods.dlight_sb.DLightSB",
             "dlight_sb_fixed_beta": "src.methods.dlight_sb.DLightSB",
             "dlight_sb_mm": "src.methods.dlight_sb_mm.DLightSBMM",
             "mm_fixed_beta": "src.methods.dlight_sb_mm.DLightSBMM",
@@ -193,6 +194,42 @@ class UnifiedConfigurationTest(unittest.TestCase):
                                 20,
                             )
 
+    def test_sgd_experiment_only_changes_optimizer_and_step_budget(self):
+        configs = str(ROOT / "configs")
+        with initialize_config_dir(config_dir=configs, version_base=None):
+            adam = compose(
+                config_name="config",
+                overrides=["experiment=dlight_sb/benchmark_hd/d16_g002"],
+            )
+            sgd = compose(
+                config_name="config",
+                overrides=["experiment=dlight_sb_sgd/benchmark_hd/d16_g002"],
+            )
+
+        self.assertEqual(sgd.method.optimizer._target_, "torch.optim.SGD")
+        self.assertEqual(sgd.method.optimizer.lr, 0.1)
+        self.assertEqual(sgd.method.optimizer.momentum, 0.0)
+        self.assertEqual(sgd.method.optimizer.weight_decay, 0.0)
+        self.assertEqual(sgd.method.entropy_lambda, 0)
+        self.assertEqual(sgd.data.num_train_batches, 50000)
+        self.assertEqual(sgd.trainer.max_steps, 50000)
+        self.assertGreater(sgd.data.num_train_batches, adam.data.num_train_batches)
+
+        for key in (
+            "dim",
+            "num_categories",
+            "num_potentials",
+            "num_timesteps",
+            "distr_init",
+            "entropy_warmup_steps",
+            "entropy_lambda",
+            "sample_prob",
+            "tau",
+            "freeze_beta",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(sgd.method[key], adam.method[key])
+
     def test_gradient_baseline_can_freeze_beta(self):
         model = make_model(
             DLightSB,
@@ -210,23 +247,28 @@ class UnifiedConfigurationTest(unittest.TestCase):
         self.assertFalse(torch.equal(model.log_cp_cores, cores_before))
 
     def test_runner_dry_run_is_notebook_independent(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "run_experiment.py"),
-                "mm_simplex/benchmark_hd/d16_g002",
-                "--archive",
-                "--dry-run",
-            ],
-            cwd=ROOT,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=True,
-        )
-        self.assertIn("-m src.run", result.stdout)
-        self.assertIn("task_name=test", result.stdout)
-        self.assertIn("mm_simplex/benchmark_hd/d16_g002", result.stdout)
+        for experiment in (
+            "mm_simplex/benchmark_hd/d16_g002",
+            "dlight_sb_sgd/benchmark_hd/d16_g002",
+        ):
+            with self.subTest(experiment=experiment):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "run_experiment.py"),
+                        experiment,
+                        "--archive",
+                        "--dry-run",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=True,
+                )
+                self.assertIn("-m src.run", result.stdout)
+                self.assertIn("task_name=test", result.stdout)
+                self.assertIn(experiment, result.stdout)
 
     def test_archive_contains_manifest_config_logs_and_checkpoint(self):
         script = ROOT / "scripts" / "run_experiment.py"

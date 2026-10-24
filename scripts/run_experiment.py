@@ -146,7 +146,7 @@ def main() -> int:
             overrides=[f"experiment={args.experiment}", *overrides],
         )
     seed = int(config.seed)
-    precision = str(config.trainer.precision)
+    precision = str(config.trainer.get("precision", "32-true"))
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = (
         PROJECT_ROOT

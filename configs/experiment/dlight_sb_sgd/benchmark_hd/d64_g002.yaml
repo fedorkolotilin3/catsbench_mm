@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - /experiment/dlight_sb/benchmark_hd/d64_g002
+  - override /method: dlight_sb_sgd
+  - _self_
+
+experiment_description: Plain SGD baseline with lr 0.1 no regularization and 50000 steps on benchmark_hd d64
+
+data:
+  num_train_batches: 50000
+
+trainer:
+  max_steps: 50000

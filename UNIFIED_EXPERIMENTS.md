@@ -3,6 +3,7 @@
 The repository exposes three algorithm families through Hydra configs
 
 - `dlight_sb` is the gradient baseline and keeps optimizer selection in config
+- `dlight_sb_sgd` is the plain SGD baseline with a large configurable learning rate
 - `dlight_sb_mm` is ordinary MM with optional regularization clipping and post-step projection
 - `dlight_sb_mm_simplex` is constrained MM with compiled log-domain bisection
 
@@ -12,6 +13,12 @@ Run an experiment with one short command
 
 ```bash
 python scripts/run_experiment.py dlight_sb_mm/benchmark_hd/d16_g002
+```
+
+Run the long unregularized SGD baseline
+
+```bash
+python scripts/run_experiment.py dlight_sb_sgd/benchmark_hd/d16_g002 --archive
 ```
 
 Run train then test and create a reproducible archive
