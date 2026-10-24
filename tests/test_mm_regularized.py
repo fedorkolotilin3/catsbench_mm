@@ -10,6 +10,7 @@ from scipy.optimize import brentq
 from torch.utils.data import DataLoader, TensorDataset
 
 import test_dlight_sb_mm as existing
+from src.methods.dlight_sb import DLightSB
 from src.methods.mm_regularized import (
     DLightSBMMRegularized, _exponential_log_update, _exponential_log_penalty,
 )
@@ -109,7 +110,7 @@ class RegularizedMMTest(unittest.TestCase):
                 self.assertGreaterEqual(info["surrogate_decrease"], -1e-5)
                 # Base public loss evaluates the potential independently of
                 # the cached coefficients used by mm_step.
-                data_loss, _ = existing.DLightSBMM.loss(model, *self.data())
+                data_loss, _ = DLightSB.loss(model, *self.data())
                 alpha_penalty = (
                     model.log_alpha.exp() - model.log_alpha - 1
                 ).mean()
@@ -169,7 +170,7 @@ class RegularizedMMTest(unittest.TestCase):
                 name = f"benchmark_hd/d{dimension}_g002"
                 base = compose(config_name="config", overrides=[f"experiment=dlight_sb_mm/{name}"])
                 cfg = compose(config_name="config", overrides=[f"experiment=mm_regularized/{name}"])
-                self.assertEqual(cfg.method._target_, "src.methods.mm_regularized.DLightSBMMRegularized")
+                self.assertEqual(cfg.method._target_, "src.methods.dlight_sb_mm.DLightSBMM")
                 self.assertEqual(cfg.method.regularization_lambda_alpha, .01)
                 self.assertEqual(cfg.method.regularization_lambda_cores, .5)
                 self.assertEqual(cfg.method.min_component_value, 1e-12)

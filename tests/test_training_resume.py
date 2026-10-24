@@ -35,9 +35,9 @@ class TestTrainingResume(unittest.TestCase):
     def test_mm_epoch_and_step_limits_match(self):
         config_dir = str((Path(__file__).parents[1] / "configs").resolve())
         expected_limits = {
-            "dlight_sb_mm/benchmark_hd/d2_g002": 1000,
-            "dlight_sb_mm/benchmark_hd/d16_g002": 2000,
-            "dlight_sb_mm/benchmark_hd/d64_g002": 1000,
+            "dlight_sb_mm/benchmark_hd/d2_g002": 300,
+            "dlight_sb_mm/benchmark_hd/d16_g002": 300,
+            "dlight_sb_mm/benchmark_hd/d64_g002": 600,
         }
 
         with initialize_config_dir(config_dir=config_dir, version_base="1.1"):

@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - /experiment/dlight_sb_mm/benchmark_hd/d2_g002
+  - _self_
+
+experiment_description: Ordinary MM with fixed mixture weights on benchmark_hd d2
+
+method:
+  freeze_beta: true

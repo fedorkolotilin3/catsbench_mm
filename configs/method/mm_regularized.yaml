@@ -2,7 +2,7 @@ defaults:
   - dlight_sb_mm
   - _self_
 
-_target_: src.methods.mm_regularized.DLightSBMMRegularized
+_target_: src.methods.dlight_sb_mm.DLightSBMM
 
 # Use the exact regularized minimizer without a positive floor by default.
 clip_updates: false

@@ -3,6 +3,8 @@
 defaults:
   - /experiment/dlight_sb_mm/benchmark_hd/default
 
+experiment_description: Ordinary unregularized MM on benchmark_hd d16 gaussian alpha 0.02
+
 data:
   dim: 16
   batch_size: 65536

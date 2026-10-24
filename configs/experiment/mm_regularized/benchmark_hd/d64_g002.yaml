@@ -4,3 +4,5 @@ defaults:
   - /experiment/dlight_sb_mm/benchmark_hd/d64_g002
   - override /method: mm_regularized
   - _self_
+
+experiment_description: Ordinary MM with separate exponential penalties on benchmark_hd d64
